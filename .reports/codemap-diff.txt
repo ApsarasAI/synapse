@@ -1,0 +1,30 @@
+codemap scan summary
+
+Scope:
+- Repository type: Rust workspace, single backend application with CLI wrapper
+- Files scanned: 24
+
+Changes since last scan:
+- Modified: README.md
+- Modified: tech_design.md
+- Modified: docs/CODEMAPS/dependencies.md
+- Modified: docs/CODEMAPS/architecture.mmd
+- Modified: .reports/codemap-diff.txt
+- Previous code maps remain present under docs/CODEMAPS/
+- Deleted: none
+
+New dependencies detected:
+- None beyond existing workspace dependencies and system tools already used by the runtime
+
+Architecture changes detected:
+- No new routes
+- No new services
+- No new storage layer
+- No frontend subtree
+- Linux sandbox policy is now fail-closed on missing `bwrap`; `unshare` fallback removed
+
+Stale documentation warnings:
+- None found. Repository docs and code files checked had fresh modification times within 90 days.
+
+Notes:
+- `tech_design.md` contains a mix of current implementation and planned future modules; the calibration section marks the mismatch explicitly.

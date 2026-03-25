@@ -1,0 +1,43 @@
+%% Generated: 2026-03-25 | Files scanned: 24 | Token estimate: ~220
+flowchart TB
+  subgraph CLI[synapse-cli]
+    CLI_MAIN[main.rs\nserve / runtime / doctor]
+  end
+
+  subgraph API[synapse-api]
+    SRV[server.rs\nrouter / state / serve]
+    H[GET /health]
+    M[GET /metrics]
+    E[POST /execute]
+  end
+
+  subgraph CORE[synapse-core]
+    P[SandboxPool\nmetrics + pooling]
+    X[executor.rs\nvalidate + sandbox + run]
+    T[types.rs\nExecuteRequest/Response]
+    ER[error.rs\nSynapseError]
+    S[seccomp.rs\nlinux-only sandbox policy]
+  end
+
+  subgraph OS[OS / Runtime]
+    PY[python3]
+    TMP[(temp workspace)]
+    B[bwrap / libseccomp]
+  end
+
+  CLI_MAIN --> SRV
+  SRV --> H
+  SRV --> M
+  SRV --> E
+  E --> P
+  M --> P
+  P --> X
+  X --> T
+  X --> ER
+  X --> S
+  X --> PY
+  X --> TMP
+  X --> B
+
+  classDef note fill:#f8f8f8,stroke:#bbb,color:#222;
+  class CLI,API,CORE,OS note;

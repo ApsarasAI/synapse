@@ -1,0 +1,32 @@
+## 2026-03-25 23:59
+
+Goal: 执行 docs/architecture-refactor-plan.md，完成阶段 2/3，并补回拆分后缺失的核心单元测试。
+
+Progress
+- 阶段 2 已完成：把 `crates/synapse-core/src/executor.rs` 拆成 `service.rs` 和 `runtime.rs`，`executor.rs` 只保留薄封装与兼容导出。
+- 阶段 3 已完成：API/CLI 收紧为装配与适配层。
+- 新增 `crates/synapse-api/src/app.rs`，把默认 `AppState` / `SandboxPool` 构造从 `server.rs` 移出。
+- `crates/synapse-api/src/server.rs` 现在只处理路由、状态注入、HTTP 映射、metrics 渲染和错误映射。
+- 新增 `crates/synapse-cli/src/doctor.rs`，把 `doctor` 检查逻辑和测试从 `main.rs` 移出。
+- 在 `crates/synapse-core/src/service.rs` 和 `crates/synapse-core/src/runtime.rs` 补回单元测试，`synapse_core` 测试数恢复到 21 个。
+
+Validated
+- `cargo fmt --all`
+- `cargo test --workspace`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- Evidence: 三个命令在本次会话末均通过；`synapse_core` 单元测试结果为 `21 passed; 0 failed`。
+
+Failed
+- 直接使用 `apply_patch` 不稳定，执行环境会因包装层问题失败。
+- Why: 当前 exec/bwrap 环境对部分工具调用有兼容性问题，曾出现 `bwrap: Unknown option --argv0`。
+- 新增测试 `memory_limit_bytes_rejects_overflow` 首次失败。
+- Why: 测试错误地假设 `u32::MAX` MB 在所有平台都会溢出；实际当前平台 `libc::rlim_t` 为 64 位，可正常表示。
+
+Candidates
+- 阶段 4：增加架构边界检查脚本，禁止 `core` 直接读 `std::env`、禁止 `api` 绕过 `service` 调 `runtime`。
+- 为 `service::execute_in_prepared` 增加更细的行为测试，例如 reset 失败优先级、prepared sandbox 生命周期行为。
+- 为 `runtime::run_process` 增加更细的集成/边界测试，例如 timeout stderr 拼接、stdout/stderr 截断组合行为。
+
+Next
+- 从阶段 4 开始，优先实现可在 CI 中运行的依赖/边界检查脚本。
+- Blocker: 无功能性阻塞；主要约束是当前环境下文件编辑更适合通过 `python3` 写文件而不是 `apply_patch`。

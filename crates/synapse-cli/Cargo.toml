@@ -7,5 +7,6 @@ repository.workspace = true
 
 [dependencies]
 synapse-api = { path = "../synapse-api" }
+synapse-core = { path = "../synapse-core" }
 clap = { version = "4", features = ["derive"] }
 tokio = { workspace = true }
