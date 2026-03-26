@@ -5,6 +5,17 @@ use std::sync::{
 
 use synapse_core::{ErrorCode, ExecuteResponse};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionLifecycle {
+    Admitted,
+    Queued,
+    Started,
+    RuntimeResolved,
+    LimitHit,
+    Completed,
+    CleanupDone,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ExecutionMetrics {
     inner: Arc<ExecutionMetricsInner>,
@@ -31,6 +42,13 @@ struct ExecutionMetricsInner {
     auth_required_total: AtomicU64,
     auth_invalid_total: AtomicU64,
     tenant_forbidden_total: AtomicU64,
+    admitted_total: AtomicU64,
+    queued_total: AtomicU64,
+    started_total: AtomicU64,
+    runtime_resolved_total: AtomicU64,
+    limit_hit_total: AtomicU64,
+    completed_total: AtomicU64,
+    cleanup_done_total: AtomicU64,
     stdout_truncated_total: AtomicU64,
     stderr_truncated_total: AtomicU64,
 }
@@ -56,6 +74,13 @@ pub struct ExecutionMetricsSnapshot {
     pub auth_required_total: u64,
     pub auth_invalid_total: u64,
     pub tenant_forbidden_total: u64,
+    pub admitted_total: u64,
+    pub queued_total: u64,
+    pub started_total: u64,
+    pub runtime_resolved_total: u64,
+    pub limit_hit_total: u64,
+    pub completed_total: u64,
+    pub cleanup_done_total: u64,
     pub stdout_truncated_total: u64,
     pub stderr_truncated_total: u64,
 }
@@ -171,6 +196,19 @@ impl ExecutionMetrics {
         }
     }
 
+    pub fn record_lifecycle(&self, lifecycle: ExecutionLifecycle) {
+        let counter = match lifecycle {
+            ExecutionLifecycle::Admitted => &self.inner.admitted_total,
+            ExecutionLifecycle::Queued => &self.inner.queued_total,
+            ExecutionLifecycle::Started => &self.inner.started_total,
+            ExecutionLifecycle::RuntimeResolved => &self.inner.runtime_resolved_total,
+            ExecutionLifecycle::LimitHit => &self.inner.limit_hit_total,
+            ExecutionLifecycle::Completed => &self.inner.completed_total,
+            ExecutionLifecycle::CleanupDone => &self.inner.cleanup_done_total,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> ExecutionMetricsSnapshot {
         ExecutionMetricsSnapshot {
             success_total: self.inner.success_total.load(Ordering::Relaxed),
@@ -204,6 +242,13 @@ impl ExecutionMetrics {
             auth_required_total: self.inner.auth_required_total.load(Ordering::Relaxed),
             auth_invalid_total: self.inner.auth_invalid_total.load(Ordering::Relaxed),
             tenant_forbidden_total: self.inner.tenant_forbidden_total.load(Ordering::Relaxed),
+            admitted_total: self.inner.admitted_total.load(Ordering::Relaxed),
+            queued_total: self.inner.queued_total.load(Ordering::Relaxed),
+            started_total: self.inner.started_total.load(Ordering::Relaxed),
+            runtime_resolved_total: self.inner.runtime_resolved_total.load(Ordering::Relaxed),
+            limit_hit_total: self.inner.limit_hit_total.load(Ordering::Relaxed),
+            completed_total: self.inner.completed_total.load(Ordering::Relaxed),
+            cleanup_done_total: self.inner.cleanup_done_total.load(Ordering::Relaxed),
             stdout_truncated_total: self.inner.stdout_truncated_total.load(Ordering::Relaxed),
             stderr_truncated_total: self.inner.stderr_truncated_total.load(Ordering::Relaxed),
         }
@@ -212,7 +257,7 @@ impl ExecutionMetrics {
 
 #[cfg(test)]
 mod tests {
-    use super::ExecutionMetrics;
+    use super::{ExecutionLifecycle, ExecutionMetrics};
     use synapse_core::{ErrorCode, ExecuteError, ExecuteResponse, OutputSummary};
 
     #[test]
@@ -243,11 +288,15 @@ mod tests {
             },
             0,
         ));
+        metrics.record_lifecycle(ExecutionLifecycle::Admitted);
+        metrics.record_lifecycle(ExecutionLifecycle::Completed);
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.success_total, 1);
         assert_eq!(snapshot.error_total, 1);
         assert_eq!(snapshot.wall_timeout_total, 1);
+        assert_eq!(snapshot.admitted_total, 1);
+        assert_eq!(snapshot.completed_total, 1);
         assert_eq!(snapshot.queue_timeout_total, 0);
         assert_eq!(snapshot.capacity_rejected_total, 0);
         assert_eq!(snapshot.stdout_truncated_total, 1);

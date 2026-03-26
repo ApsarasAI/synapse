@@ -356,6 +356,9 @@ async fn metrics_track_timeout_and_truncation_dimensions() {
     assert!(text.contains("synapse_execute_success_total 1"));
     assert!(text.contains("synapse_execute_error_total 1"));
     assert!(text.contains("synapse_execute_wall_timeout_total 1"));
+    assert!(text.contains("synapse_execute_lifecycle_admitted_total 2"));
+    assert!(text.contains("synapse_execute_lifecycle_completed_total 2"));
+    assert!(text.contains("synapse_execute_lifecycle_cleanup_done_total 2"));
     assert!(text.contains("synapse_execute_stdout_truncated_total 1"));
 }
 
@@ -516,7 +519,7 @@ async fn audits_capture_command_and_completion_details() {
     };
     let app = router_with_state(state);
 
-    let request_id = "audit-command-details";
+    let request_id = unique_request_id("audit-command-details");
     let response = app
         .clone()
         .oneshot(
@@ -524,7 +527,7 @@ async fn audits_capture_command_and_completion_details() {
                 .method("POST")
                 .uri("/execute")
                 .header("content-type", "application/json")
-                .header("x-synapse-request-id", request_id)
+                .header("x-synapse-request-id", &request_id)
                 .body(Body::from(
                     json!({
                         "language": "python",
@@ -562,10 +565,17 @@ async fn audits_capture_command_and_completion_details() {
             && event["fields"]["command"] == "python3"
             && event["fields"]["runtime_language"] == "python"
     }));
+    assert!(items
+        .iter()
+        .any(|event| event["fields"]["lifecycle"] == "runtime_resolved"));
     assert!(items.iter().any(|event| {
         event["kind"] == "execution_finished"
             && event["fields"]["exit_code"] == "0"
             && event["fields"]["stdout_truncated"] == "false"
+            && event["fields"]["lifecycle"] == "completed"
+    }));
+    assert!(items.iter().any(|event| {
+        event["kind"] == "sandbox_reset" && event["fields"]["lifecycle"] == "cleanup_done"
     }));
 }
 
@@ -580,7 +590,7 @@ async fn audits_capture_limit_exceeded_details() {
     };
     let app = router_with_state(state);
 
-    let request_id = "audit-limit-details";
+    let request_id = unique_request_id("audit-limit-details");
     let response = app
         .clone()
         .oneshot(
@@ -588,7 +598,7 @@ async fn audits_capture_limit_exceeded_details() {
                 .method("POST")
                 .uri("/execute")
                 .header("content-type", "application/json")
-                .header("x-synapse-request-id", request_id)
+                .header("x-synapse-request-id", &request_id)
                 .body(Body::from(
                     json!({
                         "language": "python",
@@ -639,7 +649,7 @@ async fn audits_capture_network_attempt_details() {
     };
     let app = router_with_state(state);
 
-    let request_id = "audit-network-details";
+    let request_id = unique_request_id("audit-network-details");
     let response = app
         .clone()
         .oneshot(
@@ -647,7 +657,7 @@ async fn audits_capture_network_attempt_details() {
                 .method("POST")
                 .uri("/execute")
                 .header("content-type", "application/json")
-                .header("x-synapse-request-id", request_id)
+                .header("x-synapse-request-id", &request_id)
                 .body(Body::from(
                     json!({
                         "language": "python",
@@ -700,7 +710,7 @@ async fn audits_capture_process_spawn_attempt_details() {
     };
     let app = router_with_state(state);
 
-    let request_id = "audit-process-details";
+    let request_id = unique_request_id("audit-process-details");
     let response = app
         .clone()
         .oneshot(
@@ -708,7 +718,7 @@ async fn audits_capture_process_spawn_attempt_details() {
                 .method("POST")
                 .uri("/execute")
                 .header("content-type", "application/json")
-                .header("x-synapse-request-id", request_id)
+                .header("x-synapse-request-id", &request_id)
                 .body(Body::from(
                     json!({
                         "language": "python",

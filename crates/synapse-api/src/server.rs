@@ -19,7 +19,10 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info, instrument};
 
 pub use crate::app::AppState;
-use crate::app::{default_state, AuthPrincipal};
+use crate::{
+    app::{default_state, AuthPrincipal},
+    metrics::ExecutionLifecycle,
+};
 
 const TENANT_HEADER: &str = "x-synapse-tenant-id";
 const REQUEST_ID_HEADER: &str = "x-synapse-request-id";
@@ -188,12 +191,23 @@ async fn execute_request(
 
     let _permit = match state.scheduler().acquire(&tenant_id).await {
         Ok(permit) => {
+            state
+                .execution_metrics()
+                .record_lifecycle(ExecutionLifecycle::Admitted);
+            if permit.was_queued() {
+                state
+                    .execution_metrics()
+                    .record_lifecycle(ExecutionLifecycle::Queued);
+            }
             let mut event = audit_event(
                 request_id.clone(),
                 Some(&tenant_id),
                 AuditEventKind::QuotaAccepted,
                 "execution capacity admitted",
             );
+            event
+                .fields
+                .insert("lifecycle".to_string(), "admitted".to_string());
             event
                 .fields
                 .insert("queued".to_string(), permit.was_queued().to_string());
@@ -235,10 +249,14 @@ async fn execute_request(
         Ok(mut response) => {
             audit.append(&mut response.sandbox_audit);
             audit.extend(finalize_execution_audit_events(
+                &state,
                 &request_id,
                 &tenant_id,
                 &response,
             ));
+            state
+                .execution_metrics()
+                .record_lifecycle(ExecutionLifecycle::Completed);
             response.audit = Some(synapse_core::AuditSummary {
                 request_id: request_id.clone(),
                 event_count: audit.len(),
@@ -262,6 +280,9 @@ async fn execute_request(
                 request_id: request_id.clone(),
                 event_count: audit.len(),
             });
+            state
+                .execution_metrics()
+                .record_lifecycle(ExecutionLifecycle::Completed);
             state.execution_metrics().record_error_code(error.code());
             persist_audit(&state, &request_id, &audit);
             error!(
@@ -496,6 +517,13 @@ fn render_metrics(state: &AppState) -> String {
             "synapse_execute_auth_required_total {}\n",
             "synapse_execute_auth_invalid_total {}\n",
             "synapse_execute_tenant_forbidden_total {}\n",
+            "synapse_execute_lifecycle_admitted_total {}\n",
+            "synapse_execute_lifecycle_queued_total {}\n",
+            "synapse_execute_lifecycle_started_total {}\n",
+            "synapse_execute_lifecycle_runtime_resolved_total {}\n",
+            "synapse_execute_lifecycle_limit_hit_total {}\n",
+            "synapse_execute_lifecycle_completed_total {}\n",
+            "synapse_execute_lifecycle_cleanup_done_total {}\n",
             "synapse_execute_stdout_truncated_total {}\n",
             "synapse_execute_stderr_truncated_total {}\n",
         ),
@@ -543,6 +571,13 @@ fn render_metrics(state: &AppState) -> String {
         execution_metrics.auth_required_total,
         execution_metrics.auth_invalid_total,
         execution_metrics.tenant_forbidden_total,
+        execution_metrics.admitted_total,
+        execution_metrics.queued_total,
+        execution_metrics.started_total,
+        execution_metrics.runtime_resolved_total,
+        execution_metrics.limit_hit_total,
+        execution_metrics.completed_total,
+        execution_metrics.cleanup_done_total,
         execution_metrics.stdout_truncated_total,
         execution_metrics.stderr_truncated_total,
     )
@@ -618,6 +653,9 @@ fn prepare_execution_audit_events(
         .runtime_registry()
         .resolve(&request.language, request.runtime_version.as_deref())
         .ok();
+    state
+        .execution_metrics()
+        .record_lifecycle(ExecutionLifecycle::Started);
 
     let mut sandbox_prepared = audit_event(
         request_id.to_string(),
@@ -625,6 +663,9 @@ fn prepare_execution_audit_events(
         AuditEventKind::SandboxPrepared,
         "sandbox prepared for execution",
     );
+    sandbox_prepared
+        .fields
+        .insert("lifecycle".to_string(), "started".to_string());
     sandbox_prepared
         .fields
         .insert("language".to_string(), request.language.clone());
@@ -641,6 +682,9 @@ fn prepare_execution_audit_events(
     );
     sandbox_reset
         .fields
+        .insert("lifecycle".to_string(), "started".to_string());
+    sandbox_reset
+        .fields
         .insert("request_id".to_string(), request_id.to_string());
 
     let mut command_prepared = audit_event(
@@ -649,6 +693,9 @@ fn prepare_execution_audit_events(
         AuditEventKind::CommandPrepared,
         "sandbox command prepared",
     );
+    command_prepared
+        .fields
+        .insert("lifecycle".to_string(), "started".to_string());
     command_prepared
         .fields
         .insert("language".to_string(), request.language.clone());
@@ -665,6 +712,12 @@ fn prepare_execution_audit_events(
         request.memory_limit_mb.to_string(),
     );
     if let Some(runtime) = resolved_runtime {
+        state
+            .execution_metrics()
+            .record_lifecycle(ExecutionLifecycle::RuntimeResolved);
+        command_prepared
+            .fields
+            .insert("lifecycle".to_string(), "runtime_resolved".to_string());
         command_prepared
             .fields
             .insert("runtime_language".to_string(), runtime.info.language);
@@ -676,12 +729,15 @@ fn prepare_execution_audit_events(
             .insert("command".to_string(), runtime.info.command);
     }
 
-    let execution_started = audit_event(
+    let mut execution_started = audit_event(
         request_id.to_string(),
         Some(tenant_id),
         AuditEventKind::ExecutionStarted,
         "sandbox execution started",
     );
+    execution_started
+        .fields
+        .insert("lifecycle".to_string(), "started".to_string());
 
     vec![
         sandbox_prepared,
@@ -692,6 +748,7 @@ fn prepare_execution_audit_events(
 }
 
 fn finalize_execution_audit_events(
+    state: &AppState,
     request_id: &str,
     tenant_id: &str,
     response: &ExecuteResponse,
@@ -705,12 +762,18 @@ fn finalize_execution_audit_events(
                 | synapse_core::ErrorCode::CpuTimeLimitExceeded
                 | synapse_core::ErrorCode::MemoryLimitExceeded
         ) {
+            state
+                .execution_metrics()
+                .record_lifecycle(ExecutionLifecycle::LimitHit);
             let mut limit_exceeded = audit_event(
                 request_id.to_string(),
                 Some(tenant_id),
                 AuditEventKind::LimitExceeded,
                 error.message.clone(),
             );
+            limit_exceeded
+                .fields
+                .insert("lifecycle".to_string(), "limit_hit".to_string());
             limit_exceeded
                 .fields
                 .insert("error_code".to_string(), format!("{:?}", error.code));
@@ -738,6 +801,9 @@ fn finalize_execution_audit_events(
         AuditEventKind::ExecutionFinished,
         "sandbox execution completed",
     );
+    execution_finished
+        .fields
+        .insert("lifecycle".to_string(), "completed".to_string());
     execution_finished
         .fields
         .insert("exit_code".to_string(), response.exit_code.to_string());
@@ -770,12 +836,18 @@ fn finalize_execution_audit_events(
     }
     events.push(execution_finished);
 
-    let sandbox_reset = audit_event(
+    state
+        .execution_metrics()
+        .record_lifecycle(ExecutionLifecycle::CleanupDone);
+    let mut sandbox_reset = audit_event(
         request_id.to_string(),
         Some(tenant_id),
         AuditEventKind::SandboxReset,
         "sandbox reset after execution",
     );
+    sandbox_reset
+        .fields
+        .insert("lifecycle".to_string(), "cleanup_done".to_string());
     events.push(sandbox_reset);
 
     events
