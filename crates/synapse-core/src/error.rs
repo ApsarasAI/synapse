@@ -28,6 +28,12 @@ pub enum SynapseError {
     QuotaExceeded(String),
     #[error("tenant rate limited: {0}")]
     RateLimited(String),
+    #[error("authentication required: {0}")]
+    AuthRequired(String),
+    #[error("authentication failed: {0}")]
+    AuthInvalid(String),
+    #[error("tenant access forbidden: {0}")]
+    TenantForbidden(String),
     #[error("audit failed: {0}")]
     Audit(String),
     #[error("io error: {0}")]
@@ -51,6 +57,9 @@ impl SynapseError {
             Self::SandboxPolicy(_) => ErrorCode::SandboxPolicyBlocked,
             Self::QuotaExceeded(_) => ErrorCode::QuotaExceeded,
             Self::RateLimited(_) => ErrorCode::RateLimited,
+            Self::AuthRequired(_) => ErrorCode::AuthRequired,
+            Self::AuthInvalid(_) => ErrorCode::AuthInvalid,
+            Self::TenantForbidden(_) => ErrorCode::TenantForbidden,
             Self::Audit(_) => ErrorCode::AuditFailed,
             Self::Io(_) => ErrorCode::IoError,
         }
@@ -72,7 +81,10 @@ impl SynapseError {
             | Self::CapacityRejected(_)
             | Self::SandboxPolicy(_)
             | Self::QuotaExceeded(_)
-            | Self::RateLimited(_) => self.to_string(),
+            | Self::RateLimited(_)
+            | Self::AuthRequired(_)
+            | Self::AuthInvalid(_)
+            | Self::TenantForbidden(_) => self.to_string(),
             Self::WallTimeout => self.to_string(),
             Self::CpuTimeLimitExceeded => self.to_string(),
             Self::MemoryLimitExceeded => self.to_string(),

@@ -3,12 +3,13 @@ use std::{collections::BTreeMap, io::ErrorKind, net::SocketAddr};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Json, Path, State,
+        Json, Path, Request, State,
     },
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::IntoResponse,
     routing::{get, post},
-    Router,
+    Extension, Router,
 };
 use synapse_core::{
     audit_event, new_request_id, validate_request_id, AuditEvent, AuditEventKind, ExecuteRequest,
@@ -17,8 +18,8 @@ use synapse_core::{
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, instrument};
 
-use crate::app::default_state;
 pub use crate::app::AppState;
+use crate::app::{default_state, AuthPrincipal};
 
 const TENANT_HEADER: &str = "x-synapse-tenant-id";
 const REQUEST_ID_HEADER: &str = "x-synapse-request-id";
@@ -28,14 +29,26 @@ pub fn router() -> Router {
 }
 
 pub fn router_with_state(state: AppState) -> Router {
+    let protected_layer = middleware::from_fn_with_state(state.clone(), require_bearer_auth);
     Router::new()
         .route("/health", get(health))
-        .route("/metrics", get(metrics))
-        .route("/audits/:request_id", get(get_audit_log))
-        .route("/execute", post(execute_request))
+        .route(
+            "/metrics",
+            get(metrics).route_layer(protected_layer.clone()),
+        )
+        .route(
+            "/audits/:request_id",
+            get(get_audit_log).route_layer(protected_layer.clone()),
+        )
+        .route(
+            "/execute",
+            post(execute_request).route_layer(protected_layer.clone()),
+        )
         .route(
             "/execute/stream",
-            get(stream_execution_websocket).post(stream_execution_legacy),
+            get(stream_execution_websocket)
+                .post(stream_execution_legacy)
+                .route_layer(protected_layer),
         )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -54,8 +67,29 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     render_metrics(&state)
 }
 
+async fn require_bearer_auth(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> impl IntoResponse {
+    match state
+        .auth()
+        .authenticate_bearer(header_value(request.headers(), "authorization"))
+    {
+        Ok(principal) => {
+            request.extensions_mut().insert(principal);
+            next.run(request).await
+        }
+        Err(error) => {
+            state.execution_metrics().record_error_code(error.code());
+            map_error(error).into_response()
+        }
+    }
+}
+
 async fn get_audit_log(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthPrincipal>,
     headers: HeaderMap,
     Path(request_id): Path<String>,
 ) -> impl IntoResponse {
@@ -66,6 +100,10 @@ async fn get_audit_log(
     let tenant_id = state
         .tenant_quotas()
         .normalize_tenant_id(header_value(&headers, TENANT_HEADER));
+    if let Err(error) = state.auth().authorize_tenant(&principal, &tenant_id) {
+        state.execution_metrics().record_error_code(error.code());
+        return map_error(error).into_response();
+    }
     match state.audit_log().load(&request_id) {
         Ok(events) if audit_visible_to_tenant(&events, &tenant_id) => {
             (StatusCode::OK, Json(events)).into_response()
@@ -81,10 +119,11 @@ async fn get_audit_log(
 #[instrument(skip(state, headers, req), fields(language = %req.language))]
 async fn execute_request(
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthPrincipal>,
     headers: HeaderMap,
     Json(mut req): Json<ExecuteRequest>,
 ) -> (StatusCode, Json<ExecuteResponse>) {
-    if let Err(error) = hydrate_request(&mut req, &headers, &state) {
+    if let Err(error) = hydrate_request(&mut req, &headers, &state, &principal) {
         let status = status_for_error(&error);
         state.execution_metrics().record_error_code(error.code());
         return (
@@ -239,27 +278,30 @@ async fn execute_request(
 async fn stream_execution_websocket(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthPrincipal>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_stream_websocket(socket, state, headers))
+    ws.on_upgrade(move |socket| handle_stream_websocket(socket, state, principal, headers))
 }
 
 async fn stream_execution_legacy(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    Extension(principal): Extension<AuthPrincipal>,
     headers: HeaderMap,
     Json(req): Json<ExecuteRequest>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_stream(socket, state, headers, req))
+    ws.on_upgrade(move |socket| handle_stream(socket, state, principal, headers, req))
 }
 
 async fn handle_stream(
     mut socket: WebSocket,
     state: AppState,
+    principal: AuthPrincipal,
     headers: HeaderMap,
     mut req: ExecuteRequest,
 ) {
-    if let Err(error) = hydrate_request(&mut req, &headers, &state) {
+    if let Err(error) = hydrate_request(&mut req, &headers, &state, &principal) {
         let _ = send_stream_error(&mut socket, &error).await;
         let _ = socket.close().await;
         return;
@@ -284,7 +326,10 @@ async fn handle_stream(
     )
     .await;
 
-    let response = execute_request(State(state), headers, Json(req)).await.1 .0;
+    let response = execute_request(State(state), Extension(principal), headers, Json(req))
+        .await
+        .1
+         .0;
 
     if !response.stdout.is_empty() {
         let _ = send_stream_event(
@@ -325,7 +370,12 @@ async fn handle_stream(
     let _ = socket.close().await;
 }
 
-async fn handle_stream_websocket(socket: WebSocket, state: AppState, headers: HeaderMap) {
+async fn handle_stream_websocket(
+    socket: WebSocket,
+    state: AppState,
+    principal: AuthPrincipal,
+    headers: HeaderMap,
+) {
     let mut socket = socket;
     let req = match receive_stream_request(&mut socket).await {
         Ok(req) => req,
@@ -336,7 +386,7 @@ async fn handle_stream_websocket(socket: WebSocket, state: AppState, headers: He
         }
     };
 
-    handle_stream(socket, state, headers, req).await;
+    handle_stream(socket, state, principal, headers, req).await;
 }
 
 async fn receive_stream_request(socket: &mut WebSocket) -> Result<ExecuteRequest, SynapseError> {
@@ -363,6 +413,7 @@ fn hydrate_request(
     req: &mut ExecuteRequest,
     headers: &HeaderMap,
     state: &AppState,
+    principal: &AuthPrincipal,
 ) -> Result<(), SynapseError> {
     if req.request_id.is_none() {
         if let Some(request_id) = header_value(headers, REQUEST_ID_HEADER) {
@@ -382,6 +433,9 @@ fn hydrate_request(
                 .or_else(|| header_value(headers, TENANT_HEADER)),
         ),
     );
+    if let Some(tenant_id) = req.tenant_id.as_deref() {
+        state.auth().authorize_tenant(principal, tenant_id)?;
+    }
 
     Ok(())
 }
@@ -439,6 +493,9 @@ fn render_metrics(state: &AppState) -> String {
             "synapse_execute_rate_limited_total {}\n",
             "synapse_execute_audit_failed_total {}\n",
             "synapse_execute_io_error_total {}\n",
+            "synapse_execute_auth_required_total {}\n",
+            "synapse_execute_auth_invalid_total {}\n",
+            "synapse_execute_tenant_forbidden_total {}\n",
             "synapse_execute_stdout_truncated_total {}\n",
             "synapse_execute_stderr_truncated_total {}\n",
         ),
@@ -483,6 +540,9 @@ fn render_metrics(state: &AppState) -> String {
         execution_metrics.rate_limited_total,
         execution_metrics.audit_failed_total,
         execution_metrics.io_error_total,
+        execution_metrics.auth_required_total,
+        execution_metrics.auth_invalid_total,
+        execution_metrics.tenant_forbidden_total,
         execution_metrics.stdout_truncated_total,
         execution_metrics.stderr_truncated_total,
     )
@@ -758,6 +818,8 @@ fn status_for_error(error: &SynapseError) -> StatusCode {
         }
         SynapseError::MemoryLimitExceeded => StatusCode::PAYLOAD_TOO_LARGE,
         SynapseError::SandboxPolicy(_) => StatusCode::FORBIDDEN,
+        SynapseError::AuthRequired(_) | SynapseError::AuthInvalid(_) => StatusCode::UNAUTHORIZED,
+        SynapseError::TenantForbidden(_) => StatusCode::FORBIDDEN,
         SynapseError::Execution(_)
         | SynapseError::Audit(_)
         | SynapseError::Internal(_)

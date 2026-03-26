@@ -43,6 +43,9 @@ pub enum ErrorCode {
     RateLimited,
     AuditFailed,
     IoError,
+    AuthRequired,
+    AuthInvalid,
+    TenantForbidden,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

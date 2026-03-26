@@ -1,9 +1,15 @@
+use std::{collections::BTreeSet, sync::Arc};
+
+use serde::Deserialize;
 use synapse_core::{
-    AuditLog, ExecutionScheduler, ExecutionSchedulerConfig, RuntimeRegistry, SandboxPool,
-    SynapseConfig, SystemProviders, TenantQuotaConfig, TenantQuotaManager,
+    AuditLog, ExecutionScheduler, ExecutionSchedulerConfig, Providers, RuntimeRegistry,
+    SandboxPool, SynapseConfig, SynapseError, SystemProviders, TenantQuotaConfig,
+    TenantQuotaManager,
 };
 
 use crate::metrics::ExecutionMetrics;
+
+const API_TOKENS_ENV: &str = "SYNAPSE_API_TOKENS";
 
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -13,11 +19,18 @@ pub struct AppState {
     scheduler: ExecutionScheduler,
     execution_metrics: ExecutionMetrics,
     runtime_registry: RuntimeRegistry,
+    auth: ApiAuthConfig,
 }
 
 impl AppState {
     pub fn new(pool: SandboxPool, audit_log: AuditLog, tenant_quotas: TenantQuotaManager) -> Self {
-        Self::new_with_runtime_registry(pool, audit_log, tenant_quotas, RuntimeRegistry::default())
+        Self::new_with_auth(
+            pool,
+            audit_log,
+            tenant_quotas,
+            RuntimeRegistry::default(),
+            ApiAuthConfig::disabled(),
+        )
     }
 
     pub fn new_with_runtime_registry(
@@ -25,6 +38,22 @@ impl AppState {
         audit_log: AuditLog,
         tenant_quotas: TenantQuotaManager,
         runtime_registry: RuntimeRegistry,
+    ) -> Self {
+        Self::new_with_auth(
+            pool,
+            audit_log,
+            tenant_quotas,
+            runtime_registry,
+            ApiAuthConfig::disabled(),
+        )
+    }
+
+    pub fn new_with_auth(
+        pool: SandboxPool,
+        audit_log: AuditLog,
+        tenant_quotas: TenantQuotaManager,
+        runtime_registry: RuntimeRegistry,
+        auth: ApiAuthConfig,
     ) -> Self {
         let scheduler = ExecutionScheduler::new(ExecutionSchedulerConfig::new(
             pool.metrics().configured_size,
@@ -39,6 +68,7 @@ impl AppState {
             scheduler,
             execution_metrics: ExecutionMetrics::default(),
             runtime_registry,
+            auth,
         }
     }
 
@@ -65,12 +95,16 @@ impl AppState {
     pub fn runtime_registry(&self) -> &RuntimeRegistry {
         &self.runtime_registry
     }
+
+    pub fn auth(&self) -> &ApiAuthConfig {
+        &self.auth
+    }
 }
 
 pub fn default_state() -> AppState {
     let config = SynapseConfig::from_providers(&SystemProviders);
     let runtime_registry = RuntimeRegistry::default();
-    AppState::new_with_runtime_registry(
+    AppState::new_with_auth(
         SandboxPool::new_with_runtime_registry(config.pool_size, runtime_registry.clone()),
         AuditLog::from_providers(&SystemProviders),
         TenantQuotaManager::new(TenantQuotaConfig {
@@ -83,5 +117,139 @@ pub fn default_state() -> AppState {
             max_queue_timeout_ms: config.max_queue_timeout_ms,
         }),
         runtime_registry,
+        ApiAuthConfig::from_providers(&SystemProviders),
     )
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ApiAuthConfig {
+    tokens: Arc<Vec<ApiToken>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthPrincipal {
+    allowed_tenants: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ApiToken {
+    secret: String,
+    allowed_tenants: BTreeSet<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiTokenDocument {
+    token: String,
+    #[serde(default)]
+    tenants: Vec<String>,
+}
+
+impl ApiAuthConfig {
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    pub fn from_providers(providers: &dyn Providers) -> Self {
+        let Some(raw) = providers.env_var(API_TOKENS_ENV) else {
+            return Self::default();
+        };
+
+        let parsed: Vec<ApiTokenDocument> = serde_json::from_str(&raw).unwrap_or_default();
+        Self::from_documents(parsed)
+    }
+
+    pub fn from_static_tokens(tokens: &[(&str, &[&str])]) -> Self {
+        Self::from_documents(
+            tokens
+                .iter()
+                .map(|(token, tenants)| ApiTokenDocument {
+                    token: (*token).to_string(),
+                    tenants: tenants.iter().map(|tenant| (*tenant).to_string()).collect(),
+                })
+                .collect(),
+        )
+    }
+
+    fn from_documents(parsed: Vec<ApiTokenDocument>) -> Self {
+        let tokens = parsed
+            .into_iter()
+            .filter_map(|token| {
+                let secret = token.token.trim().to_string();
+                if secret.is_empty() {
+                    return None;
+                }
+
+                let allowed_tenants = token
+                    .tenants
+                    .into_iter()
+                    .map(|tenant| tenant.trim().to_string())
+                    .filter(|tenant| !tenant.is_empty())
+                    .collect::<BTreeSet<_>>();
+
+                Some(ApiToken {
+                    secret,
+                    allowed_tenants,
+                })
+            })
+            .collect();
+
+        Self {
+            tokens: Arc::new(tokens),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !self.tokens.is_empty()
+    }
+
+    pub fn authenticate_bearer(
+        &self,
+        authorization: Option<&str>,
+    ) -> Result<AuthPrincipal, SynapseError> {
+        if !self.is_enabled() {
+            return Ok(AuthPrincipal {
+                allowed_tenants: BTreeSet::from(["*".to_string()]),
+            });
+        }
+
+        let header = authorization.ok_or_else(|| {
+            SynapseError::AuthRequired("missing Authorization: Bearer token".to_string())
+        })?;
+        let token = header
+            .strip_prefix("Bearer ")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                SynapseError::AuthInvalid(
+                    "invalid Authorization header; expected Bearer token".to_string(),
+                )
+            })?;
+
+        let configured = self
+            .tokens
+            .iter()
+            .find(|candidate| candidate.secret == token)
+            .ok_or_else(|| SynapseError::AuthInvalid("invalid bearer token".to_string()))?;
+
+        Ok(AuthPrincipal {
+            allowed_tenants: configured.allowed_tenants.clone(),
+        })
+    }
+
+    pub fn authorize_tenant(
+        &self,
+        principal: &AuthPrincipal,
+        tenant_id: &str,
+    ) -> Result<(), SynapseError> {
+        if !self.is_enabled()
+            || principal.allowed_tenants.contains("*")
+            || principal.allowed_tenants.contains(tenant_id)
+        {
+            return Ok(());
+        }
+
+        Err(SynapseError::TenantForbidden(format!(
+            "token is not allowed to access tenant {tenant_id}"
+        )))
+    }
 }

@@ -10,7 +10,10 @@ use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-use synapse_api::server::{router, router_with_state, AppState};
+use synapse_api::{
+    app::ApiAuthConfig,
+    server::{router, router_with_state, AppState},
+};
 use synapse_core::{
     find_command, AuditLog, RuntimeRegistry, SandboxPool, SystemProviders, TenantQuotaConfig,
     TenantQuotaManager,
@@ -68,7 +71,14 @@ async fn execute_returns_python_output() {
 
 #[tokio::test]
 async fn execute_rejects_invalid_input() {
-    let response = router()
+    let app = AppState::new_with_auth(
+        SandboxPool::new(1),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::disabled(),
+    );
+    let response = router_with_state(app)
         .oneshot(json_request(
             "/execute",
             json!({
@@ -812,7 +822,14 @@ async fn stream_websocket_reports_timeout_errors() {
 
 #[tokio::test]
 async fn audit_lookup_returns_not_found_for_missing_record() {
-    let response = router()
+    let app = AppState::new_with_auth(
+        SandboxPool::new(1),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::disabled(),
+    );
+    let response = router_with_state(app)
         .oneshot(
             Request::builder()
                 .uri("/audits/missing_record")
@@ -828,7 +845,14 @@ async fn audit_lookup_returns_not_found_for_missing_record() {
 
 #[tokio::test]
 async fn audit_lookup_rejects_invalid_request_id() {
-    let response = router()
+    let app = AppState::new_with_auth(
+        SandboxPool::new(1),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::disabled(),
+    );
+    let response = router_with_state(app)
         .oneshot(
             Request::builder()
                 .uri("/audits/bad$request")
@@ -840,6 +864,80 @@ async fn audit_lookup_rejects_invalid_request_id() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn protected_routes_require_authorization_token() {
+    let app = router_with_state(auth_test_state(1).unwrap());
+    let response = app
+        .oneshot(json_request(
+            "/execute",
+            json!({
+                "language": "python",
+                "code": "print('auth')\n",
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "auth_required");
+}
+
+#[tokio::test]
+async fn protected_routes_reject_invalid_token() {
+    let app = router_with_state(auth_test_state(1).unwrap());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/execute")
+                .header("authorization", "Bearer wrong-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "language": "python",
+                        "code": "print('auth')\n",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "auth_invalid");
+}
+
+#[tokio::test]
+async fn execute_rejects_tenant_mismatch_for_authorized_token() {
+    let app = router_with_state(auth_test_state(1).unwrap());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/execute")
+                .header("authorization", "Bearer tenant-a-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "language": "python",
+                        "code": "print('auth')\n",
+                        "tenant_id": "tenant-b",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "tenant_forbidden");
 }
 
 #[tokio::test]
@@ -891,6 +989,59 @@ async fn audit_lookup_requires_matching_tenant() {
     assert_eq!(forbidden.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn audit_lookup_rejects_cross_tenant_token_access() {
+    if !python3_available().await {
+        return;
+    }
+
+    let Some(state) = auth_test_state(1) else {
+        return;
+    };
+    let app = router_with_state(state);
+    let request_id = unique_request_id("tenant-audit-auth");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/execute")
+                .header("authorization", "Bearer tenant-a-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "language": "python",
+                        "code": "print('tenant audit auth')\n",
+                        "tenant_id": "tenant-a",
+                        "request_id": request_id,
+                        "timeout_ms": 5_000,
+                        "memory_limit_mb": 128
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let forbidden = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/audits/{request_id}"))
+                .header("authorization", "Bearer tenant-a-token")
+                .header("x-synapse-tenant-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    let body = json_body(forbidden).await;
+    assert_eq!(body["error"]["code"], "tenant_forbidden");
+}
+
 fn json_request(uri: &str, payload: Value) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -926,6 +1077,20 @@ fn runtime_test_state(pool_size: usize, quotas: TenantQuotaManager) -> Option<Ap
         AuditLog::default(),
         quotas,
         registry,
+    ))
+}
+
+fn auth_test_state(pool_size: usize) -> Option<AppState> {
+    let registry = provision_python_runtime_registry()?;
+    Some(AppState::new_with_auth(
+        SandboxPool::new_with_runtime_registry(pool_size, registry.clone()),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        registry,
+        ApiAuthConfig::from_static_tokens(&[
+            ("tenant-a-token", &["tenant-a"]),
+            ("ops-token", &["*"]),
+        ]),
     ))
 }
 

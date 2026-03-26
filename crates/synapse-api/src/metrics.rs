@@ -28,6 +28,9 @@ struct ExecutionMetricsInner {
     rate_limited_total: AtomicU64,
     audit_failed_total: AtomicU64,
     io_error_total: AtomicU64,
+    auth_required_total: AtomicU64,
+    auth_invalid_total: AtomicU64,
+    tenant_forbidden_total: AtomicU64,
     stdout_truncated_total: AtomicU64,
     stderr_truncated_total: AtomicU64,
 }
@@ -50,6 +53,9 @@ pub struct ExecutionMetricsSnapshot {
     pub rate_limited_total: u64,
     pub audit_failed_total: u64,
     pub io_error_total: u64,
+    pub auth_required_total: u64,
+    pub auth_invalid_total: u64,
+    pub tenant_forbidden_total: u64,
     pub stdout_truncated_total: u64,
     pub stderr_truncated_total: u64,
 }
@@ -147,6 +153,21 @@ impl ExecutionMetrics {
             ErrorCode::IoError => {
                 self.inner.io_error_total.fetch_add(1, Ordering::Relaxed);
             }
+            ErrorCode::AuthRequired => {
+                self.inner
+                    .auth_required_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            ErrorCode::AuthInvalid => {
+                self.inner
+                    .auth_invalid_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            ErrorCode::TenantForbidden => {
+                self.inner
+                    .tenant_forbidden_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -180,6 +201,9 @@ impl ExecutionMetrics {
             rate_limited_total: self.inner.rate_limited_total.load(Ordering::Relaxed),
             audit_failed_total: self.inner.audit_failed_total.load(Ordering::Relaxed),
             io_error_total: self.inner.io_error_total.load(Ordering::Relaxed),
+            auth_required_total: self.inner.auth_required_total.load(Ordering::Relaxed),
+            auth_invalid_total: self.inner.auth_invalid_total.load(Ordering::Relaxed),
+            tenant_forbidden_total: self.inner.tenant_forbidden_total.load(Ordering::Relaxed),
             stdout_truncated_total: self.inner.stdout_truncated_total.load(Ordering::Relaxed),
             stderr_truncated_total: self.inner.stderr_truncated_total.load(Ordering::Relaxed),
         }
