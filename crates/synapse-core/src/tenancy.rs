@@ -126,7 +126,7 @@ impl Default for TenantQuotaManager {
 #[cfg(test)]
 mod tests {
     use super::{TenantQuotaConfig, TenantQuotaManager};
-    use crate::ExecuteRequest;
+    use crate::{ExecuteRequest, NetworkPolicy};
 
     fn request() -> ExecuteRequest {
         ExecuteRequest {
@@ -138,6 +138,7 @@ mod tests {
             runtime_version: None,
             tenant_id: None,
             request_id: None,
+            network_policy: NetworkPolicy::Disabled,
         }
     }
 

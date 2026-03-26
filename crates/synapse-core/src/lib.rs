@@ -40,5 +40,5 @@ pub use scheduler::{
 pub use tenancy::{TenantPermit, TenantQuotaConfig, TenantQuotaManager};
 pub use types::{
     AuditSummary, ErrorCode, ExecuteError, ExecuteRequest, ExecuteResponse, LimitSummary,
-    OutputSummary,
+    NetworkPolicy, OutputSummary,
 };

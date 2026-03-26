@@ -1,6 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use synapse_core::{
-    execute_in_prepared, prepare_sandbox_blocking, ExecuteRequest, RuntimeRegistry, SandboxPool,
+    execute_in_prepared, prepare_sandbox_blocking, ExecuteRequest, NetworkPolicy, RuntimeRegistry,
+    SandboxPool,
 };
 
 fn bench_pool_acquire(c: &mut Criterion) {
@@ -82,6 +83,7 @@ fn request() -> ExecuteRequest {
         runtime_version: None,
         tenant_id: None,
         request_id: None,
+        network_policy: NetworkPolicy::Disabled,
     }
 }
 

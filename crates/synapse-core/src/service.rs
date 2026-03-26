@@ -3,8 +3,8 @@ use std::path::Path;
 use tracing::{info, instrument};
 
 use crate::{
-    new_request_id, runtime, ExecuteRequest, ExecuteResponse, LimitSummary, RuntimeRegistry,
-    SynapseError, SystemProviders,
+    new_request_id, runtime, ExecuteRequest, ExecuteResponse, LimitSummary, NetworkPolicy,
+    RuntimeRegistry, SynapseError, SystemProviders,
 };
 
 #[instrument(skip(request), fields(language = %request.language, tenant_id = request.tenant_id.as_deref().unwrap_or("default")))]
@@ -124,6 +124,21 @@ fn validate_request(request: &ExecuteRequest) -> Result<(), SynapseError> {
         ));
     }
 
+    match &request.network_policy {
+        NetworkPolicy::Disabled => {}
+        NetworkPolicy::AllowList { hosts } if hosts.is_empty() => {
+            return Err(SynapseError::InvalidInput(
+                "network allow_list policy requires at least one host".to_string(),
+            ));
+        }
+        NetworkPolicy::AllowList { .. } => {
+            return Err(SynapseError::SandboxPolicy(
+                "network allow_list mode is not supported by the current sandbox backend"
+                    .to_string(),
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -137,7 +152,7 @@ fn resolve_runtime(
 #[cfg(test)]
 mod tests {
     use super::{resolve_runtime, validate_request};
-    use crate::{ExecuteRequest, RuntimeRegistry, SynapseError};
+    use crate::{ExecuteRequest, NetworkPolicy, RuntimeRegistry, SynapseError};
     use std::{env, fs, path::PathBuf};
 
     fn request() -> ExecuteRequest {
@@ -150,6 +165,7 @@ mod tests {
             runtime_version: None,
             tenant_id: None,
             request_id: None,
+            network_policy: NetworkPolicy::Disabled,
         }
     }
 
@@ -230,6 +246,30 @@ mod tests {
         let error = validate_request(&request).unwrap_err();
         assert!(
             matches!(error, SynapseError::InvalidInput(message) if message == "memory_limit_mb must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn validate_request_rejects_empty_network_allow_list() {
+        let mut request = request();
+        request.network_policy = NetworkPolicy::AllowList { hosts: Vec::new() };
+
+        let error = validate_request(&request).unwrap_err();
+        assert!(
+            matches!(error, SynapseError::InvalidInput(message) if message == "network allow_list policy requires at least one host")
+        );
+    }
+
+    #[test]
+    fn validate_request_rejects_unsupported_network_allow_list() {
+        let mut request = request();
+        request.network_policy = NetworkPolicy::AllowList {
+            hosts: vec!["example.com:443".to_string()],
+        };
+
+        let error = validate_request(&request).unwrap_err();
+        assert!(
+            matches!(error, SynapseError::SandboxPolicy(message) if message.contains("allow_list mode"))
         );
     }
 

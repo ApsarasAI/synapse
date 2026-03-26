@@ -18,6 +18,8 @@ pub struct ExecuteRequest {
     pub tenant_id: Option<String>,
     #[serde(default)]
     pub request_id: Option<String>,
+    #[serde(default)]
+    pub network_policy: NetworkPolicy,
 }
 
 impl ExecuteRequest {
@@ -46,6 +48,19 @@ pub enum ErrorCode {
     AuthRequired,
     AuthInvalid,
     TenantForbidden,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum NetworkPolicy {
+    Disabled,
+    AllowList { hosts: Vec<String> },
+}
+
+impl Default for NetworkPolicy {
+    fn default() -> Self {
+        Self::Disabled
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

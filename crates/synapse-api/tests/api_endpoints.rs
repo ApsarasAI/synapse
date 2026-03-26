@@ -99,6 +99,35 @@ async fn execute_rejects_invalid_input() {
 }
 
 #[tokio::test]
+async fn execute_rejects_unsupported_network_allow_list_policy() {
+    let app = AppState::new_with_auth(
+        SandboxPool::new(1),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::disabled(),
+    );
+    let response = router_with_state(app)
+        .oneshot(json_request(
+            "/execute",
+            json!({
+                "language": "python",
+                "code": "print('blocked')\n",
+                "network_policy": {
+                    "mode": "allow_list",
+                    "hosts": ["example.com:443"]
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "sandbox_policy_blocked");
+}
+
+#[tokio::test]
 async fn execute_times_out_through_http() {
     if !python3_available().await {
         return;

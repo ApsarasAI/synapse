@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, fs};
 
-use synapse_core::{execute_in_prepared, prepare_sandbox, ExecuteRequest};
+use synapse_core::{execute_in_prepared, prepare_sandbox, ExecuteRequest, NetworkPolicy};
 
 fn request(code: &str) -> ExecuteRequest {
     ExecuteRequest {
@@ -12,6 +12,7 @@ fn request(code: &str) -> ExecuteRequest {
         runtime_version: None,
         tenant_id: Some("tenant-isolation".to_string()),
         request_id: None,
+        network_policy: NetworkPolicy::Disabled,
     }
 }
 
