@@ -1,5 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use synapse_core::{execute, prepare_sandbox_blocking, ExecuteRequest, SandboxPool};
+use synapse_core::{
+    execute_in_prepared, prepare_sandbox_blocking, ExecuteRequest, RuntimeRegistry, SandboxPool,
+};
 
 fn bench_pool_acquire(c: &mut Criterion) {
     let pool = SandboxPool::new(4);
@@ -28,12 +30,36 @@ fn bench_execute_hello(c: &mut Criterion) {
         return;
     }
 
-    c.bench_function("execute_hello", |b| {
+    let registry = RuntimeRegistry::default();
+    if registry.verify("python", None).is_err() {
+        return;
+    }
+    let sandbox = prepare_sandbox_blocking().expect("sandbox should be created");
+
+    c.bench_function("execute_fast_path", |b| {
         b.to_async(&runtime).iter(|| async {
-            let response = execute(request()).await.expect("execution should succeed");
+            let response = execute_in_prepared(&sandbox, request())
+                .await
+                .expect("execution should succeed");
             assert_eq!(response.stdout, "hello\n");
         });
     });
+
+    sandbox
+        .destroy_blocking()
+        .expect("sandbox should be cleaned up");
+}
+
+fn bench_sandbox_recycle(c: &mut Criterion) {
+    let sandbox = prepare_sandbox_blocking().expect("sandbox should be created");
+    c.bench_function("sandbox_recycle", |b| {
+        b.iter(|| {
+            sandbox.reset_blocking().expect("sandbox should be reset");
+        });
+    });
+    sandbox
+        .destroy_blocking()
+        .expect("sandbox should be cleaned up");
 }
 
 async fn python3_available() -> bool {
@@ -63,6 +89,7 @@ criterion_group!(
     mvp,
     bench_pool_acquire,
     bench_sandbox_create,
-    bench_execute_hello
+    bench_execute_hello,
+    bench_sandbox_recycle
 );
 criterion_main!(mvp);
