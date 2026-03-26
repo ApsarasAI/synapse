@@ -8,14 +8,24 @@ on:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        rust: [stable]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Linux sandbox dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap strace curl ripgrep python3
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ matrix.rust }}
           components: clippy, rustfmt
 
       - name: Cache cargo
@@ -29,3 +39,6 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Quickstart Smoke
+        run: scripts/quickstart_smoke.sh

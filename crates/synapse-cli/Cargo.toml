@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "synapse"
+path = "src/main.rs"
+
 [dependencies]
 synapse-api = { path = "../synapse-api" }
 synapse-core = { path = "../synapse-core" }

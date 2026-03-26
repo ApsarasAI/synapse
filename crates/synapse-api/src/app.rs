@@ -313,6 +313,8 @@ mod tests {
 
         let config = ApiAuthConfig::from_providers(&providers);
         let error = config.authenticate_bearer(None).unwrap_err();
-        assert!(matches!(error, SynapseError::Internal(message) if message.contains("failed to parse SYNAPSE_API_TOKENS")));
+        assert!(
+            matches!(error, SynapseError::Internal(message) if message.contains("failed to parse SYNAPSE_API_TOKENS"))
+        );
     }
 }

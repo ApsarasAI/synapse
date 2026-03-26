@@ -76,17 +76,14 @@ impl fmt::Display for ErrorCode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum NetworkPolicy {
+    #[default]
     Disabled,
-    AllowList { hosts: Vec<String> },
-}
-
-impl Default for NetworkPolicy {
-    fn default() -> Self {
-        Self::Disabled
-    }
+    AllowList {
+        hosts: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
