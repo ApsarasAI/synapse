@@ -105,9 +105,9 @@
 当前进展（2026-03-26）：
 
 - 已增加 managed runtime store，包含 `runtimes/<language>/<version>/manifest.json` 和 active version 指针
-- 已支持 `synapse runtime list/verify/install/import-host/activate`
+- 已支持 `synapse runtime list/verify/install/install-bundle/import-host/activate`
 - runtime 解析已加入 SHA-256 完整性校验，损坏或缺失时会返回明确 `runtime_unavailable`
-- 当前仍仅支持 Python，且显式 `import-host` 工作流仍会从宿主 `python3` 导入 `python:system`，距离完全独立 runtime 供应链还有差距
+- 当前仍仅支持 Python；虽然现在可从离线 runtime bundle 安装受控工件，但显式 `import-host` 工作流仍会从宿主 `python3` 导入 `python:system`，距离完全独立 runtime 供应链还有差距
 
 ### P0.3 容量控制与执行调度
 

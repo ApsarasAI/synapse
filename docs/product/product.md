@@ -70,7 +70,7 @@ Slogan：Connect Thought to Action.（连接思想与行动）
 | 审计日志 | ✅ 生产就绪 | syscall 级细粒度审计，支持事件检索 |
 | 多租户调度 | ✅ 生产就绪 | 配额、公平队列、背压机制 |
 | 资源限制 | ✅ 生产就绪 | 内存/CPU/wall timeout 独立控制 |
-| Runtime 管理 | ⚠️ MVP 可用 | CLI 支持显式 import/verify，仅 Python，host import 仍依赖宿主解释器 |
+| Runtime 管理 | ⚠️ MVP 可用 | CLI 支持显式 install-bundle/import/verify，仅 Python，host import 仍依赖宿主解释器 |
 
 **待完善能力：**
 

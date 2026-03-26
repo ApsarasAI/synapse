@@ -38,9 +38,9 @@
   Why: the project is still effectively a Python-only MVP and needs explicit runtime/version management before it can behave like a real execution platform.
   Current assessment:
   - There is now a managed runtime store with per-version `manifest.json`, integrity hash validation, and active-version pointers.
-  - The CLI now supports `runtime list`, `runtime verify`, `runtime install`, `runtime import-host`, and `runtime activate`.
+  - The CLI now supports `runtime list`, `runtime verify`, `runtime install`, `runtime install-bundle`, `runtime import-host`, and `runtime activate`.
   - Execution resolves runtimes through the managed registry instead of hard-coding Python lookup directly in the execution path, and missing active runtimes now fail explicitly instead of silently importing from the host.
-  - The system still only supports Python, and the explicit `runtime import-host` flow still depends on a host `python3`, so this is not yet a full multi-language or independently provisioned runtime platform.
+  - The system still only supports Python. It can now install an offline runtime bundle directory without consulting host PATH, but the explicit `runtime import-host` flow still depends on a host `python3`, so this is not yet a full multi-language or independently provisioned runtime platform.
   Next steps:
   1. Define runtime metadata and version selection for supported languages.
   2. Add CLI and/or config support for installing, listing, and selecting runtimes.
