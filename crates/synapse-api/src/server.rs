@@ -289,6 +289,7 @@ async fn execute_request(
                 request_id = sanitize_log_value(&request_id),
                 tenant_id = sanitize_log_value(&tenant_id),
                 error_code = ?error.code(),
+                error = %error,
                 "execution request failed"
             );
             (status_for_error(&error), Json(response))
