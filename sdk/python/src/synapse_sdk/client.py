@@ -1,4 +1,6 @@
+import inspect
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Mapping, Optional
 from urllib.parse import urlparse, urlunparse
@@ -99,18 +101,17 @@ class SynapseClient:
             tenant_id=tenant_id,
         )
         ws_url = _http_to_ws_url(f"{self._config.base_url.rstrip('/')}/execute/stream")
-        async with websockets.connect(
-            ws_url,
-            additional_headers=self._headers(tenant_id or self._config.tenant_id),
-            open_timeout=self._config.timeout,
-        ) as websocket:
+        async with websockets.connect(ws_url, **_websocket_connect_kwargs(
+            self._headers(tenant_id or self._config.tenant_id),
+            self._config.timeout,
+        )) as websocket:
             await websocket.send(json.dumps(payload))
             async for message in websocket:
                 event = json.loads(message)
                 if event.get("event") == "error":
                     fields = event.get("fields", {})
                     raise _error_from_code(
-                        fields.get("error_code", "execution_failed").lower(),
+                        _normalize_error_code(fields.get("error_code", "execution_failed")),
                         fields.get("error", "stream execution failed"),
                     )
                 yield event
@@ -171,6 +172,24 @@ def _error_from_code(
 ) -> SynapseAPIError:
     error_type = ERROR_TYPES.get(code, SynapseAPIError)
     return error_type(code=code, message=message, status_code=status_code)
+
+
+def _websocket_connect_kwargs(
+    headers: Mapping[str, str],
+    timeout: float,
+) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {"open_timeout": timeout}
+    parameters = inspect.signature(websockets.connect).parameters
+    if "additional_headers" in parameters:
+        kwargs["additional_headers"] = headers
+    else:
+        kwargs["extra_headers"] = headers
+    return kwargs
+
+
+def _normalize_error_code(code: str) -> str:
+    normalized = re.sub(r"(?<!^)(?=[A-Z])", "_", code).replace("-", "_")
+    return normalized.strip().lower()
 
 
 def _http_to_ws_url(url: str) -> str:

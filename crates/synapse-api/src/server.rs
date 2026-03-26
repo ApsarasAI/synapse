@@ -384,7 +384,7 @@ async fn handle_stream(
         );
     }
     if let Some(error) = response.error {
-        exit_fields.insert("error_code".to_string(), format!("{:?}", error.code));
+        exit_fields.insert("error_code".to_string(), error.code.to_string());
         exit_fields.insert("error".to_string(), error.message);
     }
     let _ = send_stream_event(&mut socket, "completed", exit_fields).await;
@@ -919,7 +919,7 @@ async fn send_stream_error(
         socket,
         "error",
         json_object([
-            ("error_code", format!("{:?}", error.code())),
+            ("error_code", error.code().to_string()),
             ("error", error.to_execute_error().message),
         ]),
     )

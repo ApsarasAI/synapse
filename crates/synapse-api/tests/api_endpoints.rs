@@ -854,7 +854,7 @@ async fn stream_websocket_reports_timeout_errors() {
     }));
     assert!(events.iter().any(|event| {
         event["event"] == "completed"
-            && event["fields"]["error_code"] == "WallTimeout"
+            && event["fields"]["error_code"] == "wall_timeout"
             && event["fields"]["exit_code"] == "-1"
     }));
 }

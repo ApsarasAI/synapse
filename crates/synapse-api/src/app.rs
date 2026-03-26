@@ -124,6 +124,7 @@ pub fn default_state() -> AppState {
 #[derive(Clone, Debug, Default)]
 pub struct ApiAuthConfig {
     tokens: Arc<Vec<ApiToken>>,
+    load_error: Option<Arc<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,8 +155,15 @@ impl ApiAuthConfig {
             return Self::default();
         };
 
-        let parsed: Vec<ApiTokenDocument> = serde_json::from_str(&raw).unwrap_or_default();
-        Self::from_documents(parsed)
+        match serde_json::from_str(&raw) {
+            Ok(parsed) => Self::from_documents(parsed),
+            Err(error) => Self {
+                tokens: Arc::new(Vec::new()),
+                load_error: Some(Arc::new(format!(
+                    "failed to parse {API_TOKENS_ENV}: {error}"
+                ))),
+            },
+        }
     }
 
     pub fn from_static_tokens(tokens: &[(&str, &[&str])]) -> Self {
@@ -195,6 +203,7 @@ impl ApiAuthConfig {
 
         Self {
             tokens: Arc::new(tokens),
+            load_error: None,
         }
     }
 
@@ -206,6 +215,10 @@ impl ApiAuthConfig {
         &self,
         authorization: Option<&str>,
     ) -> Result<AuthPrincipal, SynapseError> {
+        if let Some(error) = &self.load_error {
+            return Err(SynapseError::Internal((**error).clone()));
+        }
+
         if !self.is_enabled() {
             return Ok(AuthPrincipal {
                 allowed_tenants: BTreeSet::from(["*".to_string()]),
@@ -241,6 +254,10 @@ impl ApiAuthConfig {
         principal: &AuthPrincipal,
         tenant_id: &str,
     ) -> Result<(), SynapseError> {
+        if let Some(error) = &self.load_error {
+            return Err(SynapseError::Internal((**error).clone()));
+        }
+
         if !self.is_enabled()
             || principal.allowed_tenants.contains("*")
             || principal.allowed_tenants.contains(tenant_id)
@@ -251,5 +268,51 @@ impl ApiAuthConfig {
         Err(SynapseError::TenantForbidden(format!(
             "token is not allowed to access tenant {tenant_id}"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiAuthConfig;
+    use std::{collections::HashMap, ffi::OsString, path::PathBuf};
+    use synapse_core::{Providers, SynapseError};
+
+    #[derive(Debug, Default)]
+    struct FakeProviders {
+        env: HashMap<String, String>,
+    }
+
+    impl Providers for FakeProviders {
+        fn env_var(&self, key: &str) -> Option<String> {
+            self.env.get(key).cloned()
+        }
+
+        fn env_var_os(&self, key: &str) -> Option<OsString> {
+            self.env.get(key).map(OsString::from)
+        }
+
+        fn temp_dir(&self) -> PathBuf {
+            PathBuf::from("/tmp")
+        }
+
+        fn process_id(&self) -> u32 {
+            1
+        }
+
+        fn now_unix_nanos(&self) -> u128 {
+            1
+        }
+    }
+
+    #[test]
+    fn invalid_token_config_fails_closed() {
+        let mut providers = FakeProviders::default();
+        providers
+            .env
+            .insert("SYNAPSE_API_TOKENS".to_string(), "{bad json".to_string());
+
+        let config = ApiAuthConfig::from_providers(&providers);
+        let error = config.authenticate_bearer(None).unwrap_err();
+        assert!(matches!(error, SynapseError::Internal(message) if message.contains("failed to parse SYNAPSE_API_TOKENS")));
     }
 }

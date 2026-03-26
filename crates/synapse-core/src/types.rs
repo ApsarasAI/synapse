@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::{runtimes::RuntimeInfo, AuditEvent};
 
@@ -48,6 +49,31 @@ pub enum ErrorCode {
     AuthRequired,
     AuthInvalid,
     TenantForbidden,
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::InvalidInput => "invalid_input",
+            Self::UnsupportedLanguage => "unsupported_language",
+            Self::RuntimeUnavailable => "runtime_unavailable",
+            Self::ExecutionFailed => "execution_failed",
+            Self::QueueTimeout => "queue_timeout",
+            Self::CapacityRejected => "capacity_rejected",
+            Self::WallTimeout => "wall_timeout",
+            Self::CpuTimeLimitExceeded => "cpu_time_limit_exceeded",
+            Self::MemoryLimitExceeded => "memory_limit_exceeded",
+            Self::SandboxPolicyBlocked => "sandbox_policy_blocked",
+            Self::QuotaExceeded => "quota_exceeded",
+            Self::RateLimited => "rate_limited",
+            Self::AuditFailed => "audit_failed",
+            Self::IoError => "io_error",
+            Self::AuthRequired => "auth_required",
+            Self::AuthInvalid => "auth_invalid",
+            Self::TenantForbidden => "tenant_forbidden",
+        };
+        f.write_str(value)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
