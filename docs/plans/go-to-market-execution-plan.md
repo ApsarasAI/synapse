@@ -23,6 +23,7 @@
   - runtime 导入、激活、验证命令已具备
   - 审计、错误模型、配额与安全测试已存在
   - `scripts/release_gate_v1.sh` 已存在
+  - `docs/quickstart/runtime-operations-guide.md` 已补齐运行时获取、验证、更新与损坏处理说明
 - 工作流 D 的基础材料已存在：
   - `docs/product/icp-target-list-template.md`
   - `docs/product/sales-messaging.md`

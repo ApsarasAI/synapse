@@ -34,6 +34,10 @@ cargo run -p synapse-cli -- runtime import-host --language python --version syst
 cargo run -p synapse-cli -- runtime verify --language python
 ```
 
+更完整的获取、更新与损坏处理说明见：
+
+- `docs/quickstart/runtime-operations-guide.md`
+
 ## 4. 启动服务
 
 ```bash

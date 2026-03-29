@@ -7,6 +7,7 @@ DEMO_SCRIPT = REPO_ROOT / "docs" / "product" / "demo-script.md"
 OBJECTIONS_LOG = REPO_ROOT / "docs" / "product" / "objections-log-template.md"
 POC_PLAYBOOK = REPO_ROOT / "docs" / "product" / "poc-playbook.md"
 CUSTOMER_VALIDATION_LOG = REPO_ROOT / "docs" / "product" / "customer-validation-log-template.md"
+RUNTIME_OPERATIONS_GUIDE = REPO_ROOT / "docs" / "quickstart" / "runtime-operations-guide.md"
 
 
 class GtmAssetTests(unittest.TestCase):
@@ -48,6 +49,19 @@ class GtmAssetTests(unittest.TestCase):
             "| Current Answers | 当前统一回答 |",
             "| Decision | `advance`, `hold`, `stop`, `follow_up` |",
             "## 5. 周度复盘建议",
+        ):
+            self.assertIn(expected, content)
+
+    def test_runtime_operations_guide_covers_runtime_delivery_scheme(self):
+        content = RUNTIME_OPERATIONS_GUIDE.read_text()
+
+        for expected in (
+            "# Runtime Operations Guide",
+            "## 2. 默认获取方式",
+            "runtime import-host",
+            "runtime install-bundle",
+            "## 4. 更新策略",
+            "`runtime_unavailable`",
         ):
             self.assertIn(expected, content)
 
