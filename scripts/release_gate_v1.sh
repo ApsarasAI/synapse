@@ -36,6 +36,9 @@ echo "[v1-gate] python sdk tests"
 PYTHONPATH="sdk/python/src${PYTHONPATH:+:$PYTHONPATH}" \
   "$python_bin" -m unittest discover -s sdk/python/tests
 
+echo "[v1-gate] gtm asset tests"
+"$python_bin" -m unittest discover -s scripts/tests
+
 echo "[v1-gate] quickstart smoke"
 "$quickstart_smoke_script"
 

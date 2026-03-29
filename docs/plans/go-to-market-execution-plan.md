@@ -28,13 +28,15 @@
   - `docs/product/sales-messaging.md`
   - `docs/product/poc-playbook.md`
   - `docs/product/pricing-draft.md`
+  - `docs/product/demo-script.md`
+  - `docs/product/objections-log-template.md`
 
 ### 0.2 部分完成，仍需继续执行
 
 - B2 Python SDK 首版已存在，且已补齐基础超时与重试封装；后续仍需持续补齐稳定性与回归覆盖。
 - C2 API v1 稳定契约文档与测试已存在，但仍需持续消除实现与门禁之间的遗漏。
 - C5 发布门禁已存在，但仍需继续收敛发布参数、阈值和运行环境，确保性能门禁可稳定执行。
-- D3 标准演示脚本与 D6 objections 闭环缺少更明确的仓库内追踪方式。
+- D3 标准演示脚本与 D6 objections 闭环资产已补齐；后续仍需导入真实外部反馈记录。
 
 ### 0.3 当前明确未完成或无法仅凭仓库证明已完成
 
