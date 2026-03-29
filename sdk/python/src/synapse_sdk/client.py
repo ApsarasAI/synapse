@@ -3,6 +3,8 @@ import json
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Mapping, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from urllib.parse import urlparse, urlunparse
 
 if TYPE_CHECKING:
@@ -69,13 +71,12 @@ class SynapseClient:
             request_id=request_id,
             tenant_id=tenant_id,
         )
-        httpx = _import_httpx()
-        with httpx.Client(timeout=self._config.timeout) as client:
-            response = client.post(
-                f"{self._config.base_url.rstrip('/')}/execute",
-                json=payload,
-                headers=self._headers(tenant_id or self._config.tenant_id),
-            )
+        response = _post_json(
+            f"{self._config.base_url.rstrip('/')}/execute",
+            payload,
+            self._headers(tenant_id or self._config.tenant_id),
+            self._config.timeout,
+        )
         return self._decode_response(response)
 
     async def execute_stream(
@@ -179,10 +180,57 @@ def _import_httpx():
     try:
         import httpx
     except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "httpx is required for SynapseClient.execute(); install sdk/python dependencies first"
-        ) from exc
+        return None
     return httpx
+
+
+def _post_json(
+    url: str,
+    payload: Mapping[str, Any],
+    headers: Mapping[str, str],
+    timeout: float,
+):
+    httpx = _import_httpx()
+    if httpx is not None:
+        with httpx.Client(timeout=timeout) as client:
+            return client.post(url, json=payload, headers=headers)
+    return _stdlib_post_json(url, payload, headers, timeout)
+
+
+@dataclass
+class _StdlibResponse:
+    status_code: int
+    body: str
+
+    def json(self) -> Dict[str, Any]:
+        return json.loads(self.body)
+
+
+def _stdlib_post_json(
+    url: str,
+    payload: Mapping[str, Any],
+    headers: Mapping[str, str],
+    timeout: float,
+) -> _StdlibResponse:
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=dict(headers),
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return _StdlibResponse(
+                status_code=getattr(response, "status", response.getcode()),
+                body=response.read().decode("utf-8"),
+            )
+    except HTTPError as error:
+        return _StdlibResponse(
+            status_code=error.code,
+            body=error.read().decode("utf-8"),
+        )
+    except URLError as exc:
+        raise RuntimeError(f"failed to connect to Synapse API: {exc}") from exc
 
 
 def _import_websockets():

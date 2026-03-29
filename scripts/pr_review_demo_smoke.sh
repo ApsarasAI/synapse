@@ -22,8 +22,6 @@ if ! "$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,
   exit 1
 fi
 
-"$python_bin" -c 'import httpx' >/dev/null
-
 if ! command -v curl >/dev/null 2>&1; then
   echo "curl is required for PR review demo smoke" >&2
   exit 1

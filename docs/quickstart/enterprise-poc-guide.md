@@ -86,6 +86,8 @@ curl \
 pip install -e sdk/python
 ```
 
+如果只是从仓库根目录运行标准 demo，可以直接运行 `examples/pr-review-agent/run_demo.py`；该脚本会自动加载 `sdk/python/src`。
+
 最小示例：
 
 ```python

@@ -12,7 +12,7 @@
 
 - Synapse API 已启动
 - Python runtime 已可用
-- Python 环境已安装 `httpx`
+- Python 3.10+ 环境可用
 
 从仓库根目录直接运行时，demo 会自动加载 `sdk/python/src`，不需要额外执行 `pip install -e sdk/python`。
 
