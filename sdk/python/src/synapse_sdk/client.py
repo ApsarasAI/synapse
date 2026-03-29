@@ -104,6 +104,7 @@ class SynapseClient:
         websockets = _import_websockets()
         ws_url = _http_to_ws_url(f"{self._config.base_url.rstrip('/')}/execute/stream")
         async with websockets.connect(ws_url, **_websocket_connect_kwargs(
+            websockets,
             self._headers(tenant_id or self._config.tenant_id),
             self._config.timeout,
         )) as websocket:
@@ -244,6 +245,7 @@ def _import_websockets():
 
 
 def _websocket_connect_kwargs(
+    websockets: Any,
     headers: Mapping[str, str],
     timeout: float,
 ) -> Dict[str, Any]:

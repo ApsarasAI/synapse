@@ -2,6 +2,56 @@
 
 > 本文档承接 [../product/go-to-market-plan.md](../product/go-to-market-plan.md)，将市场与产品判断转化为可执行的近期工作计划。目标不是继续扩展方向，而是收敛首版、补齐可卖能力、形成 PoC 与交付闭环。
 
+## 0. 当前状态快照（2026-03-29）
+
+以下判断基于仓库内已有代码、脚本、文档与测试结果，不包含仓库外销售活动或客户沟通记录。
+
+### 0.1 已完成或基本完成
+
+- 工作流 A 基本完成：
+  - `docs/product/v1-scope.md`
+  - `docs/product/not-in-v1.md`
+  - `docs/product/ideal-customer-profile.md`
+- 工作流 B 已形成首版交付骨架：
+  - `docs/api-reference.md`
+  - `sdk/python/`
+  - `docs/quickstart/enterprise-poc-guide.md`
+  - `docs/product/security-whitepaper.md`
+  - `docs/product/poc-playbook.md`
+  - `examples/pr-review-agent/`
+- 工作流 C 已形成首版工程骨架：
+  - runtime 导入、激活、验证命令已具备
+  - 审计、错误模型、配额与安全测试已存在
+  - `scripts/release_gate_v1.sh` 已存在
+- 工作流 D 的基础材料已存在：
+  - `docs/product/icp-target-list-template.md`
+  - `docs/product/sales-messaging.md`
+  - `docs/product/poc-playbook.md`
+  - `docs/product/pricing-draft.md`
+
+### 0.2 部分完成，仍需继续执行
+
+- B2 Python SDK 首版已存在，但仍需持续补齐稳定性与回归覆盖。
+- C2 API v1 稳定契约文档与测试已存在，但仍需持续消除实现与门禁之间的遗漏。
+- C5 发布门禁已存在，但仍需确保关键路径真实被门禁覆盖，而不是只靠人工 smoke。
+- D3 标准演示脚本与 D6 objections 闭环缺少更明确的仓库内追踪方式。
+
+### 0.3 当前明确未完成或无法仅凭仓库证明已完成
+
+- D1 首批 ICP 名单是否已真实用于外部联系，仓库内无法证明。
+- D6 是否已完成至少一轮客户 objections 记录，仓库内暂无访谈或反馈记录。
+- 8.4 中“至少完成一轮外部客户访谈或设计合作客户触达”，仓库内暂无可验证证据。
+
+### 0.4 当前执行策略
+
+从 2026-03-29 起，按“一次补一项缺口”的方式推进，每次迭代都必须完成：
+
+1. 一项功能或一项交付闭环修复
+2. 对应单元测试、集成测试或 smoke 测试
+3. 代码审核，包含安全审核
+4. 完成度评估
+5. `git add`、`git commit`
+
 ## 1. 目标
 
 在未来 8 周内，把 Synapse 从“可用的安全执行后端”推进到“可向设计合作客户交付的企业内 AI 执行平面首版”。

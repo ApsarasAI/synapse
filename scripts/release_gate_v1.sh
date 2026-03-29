@@ -21,6 +21,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 echo "[v1-gate] cargo test"
 cargo test --workspace
 
+echo "[v1-gate] python sdk tests"
+PYTHONPATH="sdk/python/src${PYTHONPATH:+:$PYTHONPATH}" \
+  "$python_bin" -m unittest discover -s sdk/python/tests
+
 echo "[v1-gate] quickstart smoke"
 scripts/quickstart_smoke.sh
 
