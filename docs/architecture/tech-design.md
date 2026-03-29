@@ -1192,7 +1192,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/synapse/synapse"
+repository = "https://github.com/ApsarasAI/synapse"
 
 [workspace.dependencies]
 # 异步运行时
