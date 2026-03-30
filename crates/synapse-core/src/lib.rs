@@ -6,6 +6,7 @@ pub mod error;
 pub mod executor;
 pub mod pool;
 pub mod providers;
+pub mod request_summary;
 pub mod runtime;
 pub mod runtimes;
 pub mod scheduler;
@@ -28,6 +29,9 @@ pub use executor::{
 };
 pub use pool::{PoolMetrics, SandboxPool};
 pub use providers::{find_command, temp_path, Providers, SystemProviders};
+pub use request_summary::{
+    RequestStatus, RequestSummary, RequestSummaryQuery, RequestSummaryStore,
+};
 #[cfg(target_os = "linux")]
 pub use runtime::probe_linux_sandbox_support;
 pub use runtimes::{

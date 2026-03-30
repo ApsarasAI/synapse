@@ -64,6 +64,10 @@ impl AuditLog {
         Self { root }
     }
 
+    pub fn from_root(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

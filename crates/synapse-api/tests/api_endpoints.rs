@@ -15,7 +15,8 @@ use synapse_api::{
     server::{router, router_with_state, AppState},
 };
 use synapse_core::{
-    find_command, AuditLog, RuntimeRegistry, SandboxPool, SystemProviders, TenantQuotaConfig,
+    audit_event, find_command, AuditEventKind, AuditLog, RequestStatus, RequestSummary,
+    RequestSummaryStore, RuntimeRegistry, SandboxPool, SystemProviders, TenantQuotaConfig,
     TenantQuotaManager,
 };
 use tokio::net::TcpListener;
@@ -1081,6 +1082,148 @@ async fn audit_lookup_rejects_cross_tenant_token_access() {
     assert_eq!(body["error"]["code"], "tenant_forbidden");
 }
 
+#[tokio::test]
+async fn admin_requests_are_filtered_to_authorized_tenants() {
+    let app = router_with_state(seeded_admin_state());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/requests")
+                .header("authorization", "Bearer tenant-a-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["tenant_id"], "tenant-a");
+    assert_eq!(items[0]["request_id"], "admin-tenant-a");
+}
+
+#[tokio::test]
+async fn admin_request_detail_and_audit_hide_cross_tenant_records() {
+    let app = router_with_state(seeded_admin_state());
+
+    let own_detail = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/requests/admin-tenant-a")
+                .header("authorization", "Bearer tenant-a-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(own_detail.status(), StatusCode::OK);
+
+    let foreign_detail = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/requests/admin-tenant-b")
+                .header("authorization", "Bearer tenant-a-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(foreign_detail.status(), StatusCode::NOT_FOUND);
+
+    let own_audit = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/requests/admin-tenant-a/audit")
+                .header("authorization", "Bearer tenant-a-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(own_audit.status(), StatusCode::OK);
+    let body = json_body(own_audit).await;
+    assert_eq!(body["request_id"], "admin-tenant-a");
+    assert_eq!(body["events"].as_array().unwrap().len(), 1);
+
+    let foreign_audit = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/requests/admin-tenant-b/audit")
+                .header("authorization", "Bearer tenant-a-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(foreign_audit.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn admin_overview_reports_recent_failures_and_error_counts() {
+    let app = router_with_state(seeded_admin_state());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/overview")
+                .header("authorization", "Bearer ops-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["service"]["status"], "ok");
+    assert!(!body["recent_failures"].as_array().unwrap().is_empty());
+    assert!(body["top_error_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["code"] == "wall_timeout"));
+}
+
+#[tokio::test]
+async fn admin_runtime_and_capacity_require_auth_and_return_payloads() {
+    let app = router_with_state(auth_test_state(2).unwrap());
+
+    let runtime = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/runtime")
+                .header("authorization", "Bearer ops-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(runtime.status(), StatusCode::OK);
+    let runtime_body = json_body(runtime).await;
+    assert!(!runtime_body["active"].as_array().unwrap().is_empty());
+
+    let capacity = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/capacity")
+                .header("authorization", "Bearer ops-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(capacity.status(), StatusCode::OK);
+    let capacity_body = json_body(capacity).await;
+    assert_eq!(capacity_body["limits"]["max_concurrency"], 2);
+}
+
 fn json_request(uri: &str, payload: Value) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -1111,19 +1254,22 @@ fn runtime_test_app(pool_size: usize) -> Option<axum::Router> {
 
 fn runtime_test_state(pool_size: usize, quotas: TenantQuotaManager) -> Option<AppState> {
     let registry = provision_python_runtime_registry()?;
-    Some(AppState::new_with_runtime_registry(
+    Some(AppState::new_with_services_and_auth(
         SandboxPool::new_with_runtime_registry(pool_size, registry.clone()),
-        AuditLog::default(),
+        AuditLog::from_root(unique_runtime_root("synapse-api-audit")),
+        RequestSummaryStore::from_root(unique_runtime_root("synapse-api-summaries")),
         quotas,
         registry,
+        ApiAuthConfig::disabled(),
     ))
 }
 
 fn auth_test_state(pool_size: usize) -> Option<AppState> {
     let registry = provision_python_runtime_registry()?;
-    Some(AppState::new_with_auth(
+    Some(AppState::new_with_services_and_auth(
         SandboxPool::new_with_runtime_registry(pool_size, registry.clone()),
-        AuditLog::default(),
+        AuditLog::from_root(unique_runtime_root("synapse-api-auth-audit")),
+        RequestSummaryStore::from_root(unique_runtime_root("synapse-api-auth-summaries")),
         TenantQuotaManager::default(),
         registry,
         ApiAuthConfig::from_static_tokens(&[
@@ -1131,6 +1277,74 @@ fn auth_test_state(pool_size: usize) -> Option<AppState> {
             ("ops-token", &["*"]),
         ]),
     ))
+}
+
+fn seeded_admin_state() -> AppState {
+    let audit_log = AuditLog::from_root(unique_runtime_root("synapse-admin-audit"));
+    let request_summaries =
+        RequestSummaryStore::from_root(unique_runtime_root("synapse-admin-summaries"));
+    let state = AppState::new_with_services_and_auth(
+        SandboxPool::new(1),
+        audit_log,
+        request_summaries,
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::from_static_tokens(&[
+            ("tenant-a-token", &["tenant-a"]),
+            ("ops-token", &["*"]),
+        ]),
+    );
+
+    state
+        .request_summaries()
+        .persist(&RequestSummary {
+            request_id: "admin-tenant-a".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            language: "python".to_string(),
+            status: RequestStatus::Error,
+            error_code: Some(synapse_core::ErrorCode::WallTimeout),
+            created_at_ms: 200,
+            completed_at_ms: 260,
+            duration_ms: 60,
+            queue_wait_ms: 5,
+            stdout_truncated: false,
+            stderr_truncated: true,
+            runtime_language: Some("python".to_string()),
+            runtime_version: Some("system".to_string()),
+        })
+        .unwrap();
+    state
+        .request_summaries()
+        .persist(&RequestSummary {
+            request_id: "admin-tenant-b".to_string(),
+            tenant_id: "tenant-b".to_string(),
+            language: "python".to_string(),
+            status: RequestStatus::Success,
+            error_code: None,
+            created_at_ms: 100,
+            completed_at_ms: 110,
+            duration_ms: 10,
+            queue_wait_ms: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            runtime_language: Some("python".to_string()),
+            runtime_version: Some("system".to_string()),
+        })
+        .unwrap();
+    state
+        .audit_log()
+        .persist(
+            "admin-tenant-a",
+            &[audit_event(
+                "admin-tenant-a".to_string(),
+                Some("tenant-a"),
+                AuditEventKind::ExecutionFinished,
+                "complete",
+            )],
+        )
+        .unwrap();
+
+    state
 }
 
 fn provision_python_runtime_registry() -> Option<RuntimeRegistry> {

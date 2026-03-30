@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, io::ErrorKind, net::SocketAddr};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Json, Path, Request, State,
+        Json, Path, Query, Request, State,
     },
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -11,9 +11,11 @@ use axum::{
     routing::{get, post},
     Extension, Router,
 };
+use serde::{Deserialize, Serialize};
 use synapse_core::{
     audit_event, new_request_id, validate_request_id, AuditEvent, AuditEventKind, ExecuteRequest,
-    ExecuteResponse, SynapseError, SystemProviders,
+    ExecuteResponse, RequestStatus, RequestSummary, RequestSummaryQuery, SynapseError,
+    SystemProviders,
 };
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, instrument};
@@ -26,6 +28,110 @@ use crate::{
 
 const TENANT_HEADER: &str = "x-synapse-tenant-id";
 const REQUEST_ID_HEADER: &str = "x-synapse-request-id";
+const DEFAULT_ADMIN_LIST_LIMIT: usize = 50;
+const MAX_ADMIN_LIST_LIMIT: usize = 200;
+
+#[derive(Debug, Deserialize)]
+struct AdminRequestsQuery {
+    request_id: Option<String>,
+    tenant_id: Option<String>,
+    status: Option<String>,
+    error_code: Option<String>,
+    language: Option<String>,
+    from: Option<u64>,
+    to: Option<u64>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminOverviewResponse {
+    service: AdminServiceStatus,
+    metrics: AdminMetricsSnapshot,
+    top_error_codes: Vec<AdminErrorCount>,
+    recent_failures: Vec<RequestSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminServiceStatus {
+    status: &'static str,
+    version: &'static str,
+    started_at_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminMetricsSnapshot {
+    success_total: u64,
+    error_total: u64,
+    queued_total: u64,
+    capacity_rejected_total: u64,
+    queue_timeout_total: u64,
+    runtime_unavailable_total: u64,
+    wall_timeout_total: u64,
+    cpu_time_limit_exceeded_total: u64,
+    memory_limit_exceeded_total: u64,
+    sandbox_policy_blocked_total: u64,
+    rate_limited_total: u64,
+    quota_exceeded_total: u64,
+    stdout_truncated_total: u64,
+    stderr_truncated_total: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminErrorCount {
+    code: String,
+    count: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminRequestsResponse {
+    items: Vec<RequestSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminRequestAuditResponse {
+    request_id: String,
+    events: Vec<AuditEvent>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminRuntimeResponse {
+    active: Vec<AdminRuntimeEntry>,
+    installed: Vec<AdminRuntimeEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminRuntimeEntry {
+    language: String,
+    version: String,
+    command: String,
+    path: String,
+    active: bool,
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminCapacityResponse {
+    scheduler: AdminSchedulerSnapshot,
+    limits: AdminCapacityLimits,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminSchedulerSnapshot {
+    active_total: usize,
+    queued_total: usize,
+    admitted_total: u64,
+    rejected_total: u64,
+    queue_timeout_total: u64,
+    queue_wait_time_ms_total: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminCapacityLimits {
+    max_concurrency: usize,
+    max_queue_depth: usize,
+    max_queue_timeout_ms: u64,
+    max_concurrent_executions_per_tenant: usize,
+}
 
 pub fn router() -> Router {
     router_with_state(default_state())
@@ -42,6 +148,30 @@ pub fn router_with_state(state: AppState) -> Router {
         .route(
             "/audits/:request_id",
             get(get_audit_log).route_layer(protected_layer.clone()),
+        )
+        .route(
+            "/admin/overview",
+            get(admin_overview).route_layer(protected_layer.clone()),
+        )
+        .route(
+            "/admin/requests",
+            get(admin_list_requests).route_layer(protected_layer.clone()),
+        )
+        .route(
+            "/admin/requests/:request_id",
+            get(admin_get_request).route_layer(protected_layer.clone()),
+        )
+        .route(
+            "/admin/requests/:request_id/audit",
+            get(admin_get_request_audit).route_layer(protected_layer.clone()),
+        )
+        .route(
+            "/admin/runtime",
+            get(admin_runtime).route_layer(protected_layer.clone()),
+        )
+        .route(
+            "/admin/capacity",
+            get(admin_capacity).route_layer(protected_layer.clone()),
         )
         .route(
             "/execute",
@@ -117,6 +247,206 @@ async fn get_audit_log(
     }
 }
 
+async fn admin_overview(
+    State(state): State<AppState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Query(query): Query<AdminRequestsQuery>,
+) -> impl IntoResponse {
+    let summary_query = match admin_summary_query(&principal, query, true) {
+        Ok(summary_query) => summary_query,
+        Err(error) => {
+            state.execution_metrics().record_error_code(error.code());
+            return map_error(error).into_response();
+        }
+    };
+
+    match state.request_summaries().list(&summary_query) {
+        Ok(items) => {
+            let snapshot = state.execution_metrics().snapshot();
+            let mut error_counts = BTreeMap::new();
+            for item in &items {
+                if let Some(error_code) = item.error_code {
+                    *error_counts.entry(error_code.to_string()).or_insert(0) += 1;
+                }
+            }
+            let mut top_error_codes = error_counts
+                .into_iter()
+                .map(|(code, count)| AdminErrorCount { code, count })
+                .collect::<Vec<_>>();
+            top_error_codes.sort_by(|left, right| {
+                right
+                    .count
+                    .cmp(&left.count)
+                    .then_with(|| left.code.cmp(&right.code))
+            });
+            top_error_codes.truncate(5);
+
+            let recent_failures = items
+                .into_iter()
+                .filter(|item| item.status == RequestStatus::Error)
+                .take(10)
+                .collect();
+
+            Json(AdminOverviewResponse {
+                service: AdminServiceStatus {
+                    status: "ok",
+                    version: env!("CARGO_PKG_VERSION"),
+                    started_at_ms: state.started_at_ms(),
+                },
+                metrics: AdminMetricsSnapshot {
+                    success_total: snapshot.success_total,
+                    error_total: snapshot.error_total,
+                    queued_total: snapshot.queued_total,
+                    capacity_rejected_total: snapshot.capacity_rejected_total,
+                    queue_timeout_total: snapshot.queue_timeout_total,
+                    runtime_unavailable_total: snapshot.runtime_unavailable_total,
+                    wall_timeout_total: snapshot.wall_timeout_total,
+                    cpu_time_limit_exceeded_total: snapshot.cpu_time_limit_exceeded_total,
+                    memory_limit_exceeded_total: snapshot.memory_limit_exceeded_total,
+                    sandbox_policy_blocked_total: snapshot.sandbox_policy_blocked_total,
+                    rate_limited_total: snapshot.rate_limited_total,
+                    quota_exceeded_total: snapshot.quota_exceeded_total,
+                    stdout_truncated_total: snapshot.stdout_truncated_total,
+                    stderr_truncated_total: snapshot.stderr_truncated_total,
+                },
+                top_error_codes,
+                recent_failures,
+            })
+            .into_response()
+        }
+        Err(error) => map_error(error).into_response(),
+    }
+}
+
+async fn admin_list_requests(
+    State(state): State<AppState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Query(query): Query<AdminRequestsQuery>,
+) -> impl IntoResponse {
+    let summary_query = match admin_summary_query(&principal, query, false) {
+        Ok(summary_query) => summary_query,
+        Err(error) => {
+            state.execution_metrics().record_error_code(error.code());
+            return map_error(error).into_response();
+        }
+    };
+
+    match state.request_summaries().list(&summary_query) {
+        Ok(items) => Json(AdminRequestsResponse { items }).into_response(),
+        Err(error) => map_error(error).into_response(),
+    }
+}
+
+async fn admin_get_request(
+    State(state): State<AppState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(request_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(error) = validate_request_id(&request_id) {
+        return map_error(error).into_response();
+    }
+
+    match state.request_summaries().load(&request_id) {
+        Ok(summary) if principal.allows_tenant(&summary.tenant_id) => {
+            (StatusCode::OK, Json(summary)).into_response()
+        }
+        Ok(_) => StatusCode::NOT_FOUND.into_response(),
+        Err(SynapseError::Io(error)) if error.kind() == ErrorKind::NotFound => {
+            StatusCode::NOT_FOUND.into_response()
+        }
+        Err(error) => map_error(error).into_response(),
+    }
+}
+
+async fn admin_get_request_audit(
+    State(state): State<AppState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(request_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(error) = validate_request_id(&request_id) {
+        return map_error(error).into_response();
+    }
+
+    match state.request_summaries().load(&request_id) {
+        Ok(summary) if !principal.allows_tenant(&summary.tenant_id) => {
+            StatusCode::NOT_FOUND.into_response()
+        }
+        Ok(_) => match state.audit_log().load(&request_id) {
+            Ok(events) => (
+                StatusCode::OK,
+                Json(AdminRequestAuditResponse { request_id, events }),
+            )
+                .into_response(),
+            Err(SynapseError::Io(error)) if error.kind() == ErrorKind::NotFound => {
+                StatusCode::NOT_FOUND.into_response()
+            }
+            Err(error) => map_error(error).into_response(),
+        },
+        Err(SynapseError::Io(error)) if error.kind() == ErrorKind::NotFound => {
+            StatusCode::NOT_FOUND.into_response()
+        }
+        Err(error) => map_error(error).into_response(),
+    }
+}
+
+async fn admin_runtime(
+    State(state): State<AppState>,
+    _principal: Extension<AuthPrincipal>,
+) -> impl IntoResponse {
+    let installed = state
+        .runtime_registry()
+        .list()
+        .into_iter()
+        .map(|runtime| AdminRuntimeEntry {
+            language: runtime.language,
+            version: runtime.version,
+            command: runtime.command,
+            path: runtime.binary.display().to_string(),
+            active: runtime.active,
+            status: if runtime.healthy { "ok" } else { "corrupt" },
+        })
+        .collect::<Vec<_>>();
+    let active = installed
+        .iter()
+        .filter(|runtime| runtime.active)
+        .map(|runtime| AdminRuntimeEntry {
+            language: runtime.language.clone(),
+            version: runtime.version.clone(),
+            command: runtime.command.clone(),
+            path: runtime.path.clone(),
+            active: runtime.active,
+            status: runtime.status,
+        })
+        .collect();
+
+    Json(AdminRuntimeResponse { active, installed }).into_response()
+}
+
+async fn admin_capacity(
+    State(state): State<AppState>,
+    _principal: Extension<AuthPrincipal>,
+) -> impl IntoResponse {
+    let metrics = state.scheduler().metrics();
+    let config = state.scheduler().config();
+    Json(AdminCapacityResponse {
+        scheduler: AdminSchedulerSnapshot {
+            active_total: metrics.active_total,
+            queued_total: metrics.queued_total,
+            admitted_total: metrics.admitted_total,
+            rejected_total: metrics.rejected_total,
+            queue_timeout_total: metrics.queue_timeout_total,
+            queue_wait_time_ms_total: metrics.queue_wait_time_ms_total,
+        },
+        limits: AdminCapacityLimits {
+            max_concurrency: config.max_concurrent_executions,
+            max_queue_depth: config.max_queue_depth,
+            max_queue_timeout_ms: config.max_queue_timeout_ms,
+            max_concurrent_executions_per_tenant: config.max_concurrent_executions_per_tenant,
+        },
+    })
+    .into_response()
+}
+
 #[instrument(skip(state, headers, req), fields(language = %req.language))]
 async fn execute_request(
     State(state): State<AppState>,
@@ -141,6 +471,7 @@ async fn execute_request(
         .normalize_tenant_id(req.tenant_id.as_deref());
     req.request_id = Some(request_id.clone());
     req.tenant_id = Some(tenant_id.clone());
+    let request_language = req.language.clone();
 
     let mut audit = vec![audit_event(
         request_id.clone(),
@@ -148,6 +479,8 @@ async fn execute_request(
         AuditEventKind::RequestReceived,
         "execution request received",
     )];
+    let request_started_at_ms = audit[0].timestamp_ms;
+    let mut queue_wait_ms = 0;
 
     if let Err(error) = state.tenant_quotas().enforce_request_limits(&req) {
         audit.push(audit_with_error(
@@ -165,6 +498,17 @@ async fn execute_request(
         });
         state.execution_metrics().record_error_code(error.code());
         persist_audit(&state, &request_id, &audit);
+        persist_request_summary(
+            &state,
+            build_request_summary(
+                &request_id,
+                &tenant_id,
+                &request_language,
+                request_started_at_ms,
+                queue_wait_ms,
+                &response,
+            ),
+        );
         return (status_for_error(&error), Json(response));
     }
 
@@ -184,6 +528,17 @@ async fn execute_request(
         });
         state.execution_metrics().record_error_code(error.code());
         persist_audit(&state, &request_id, &audit);
+        persist_request_summary(
+            &state,
+            build_request_summary(
+                &request_id,
+                &tenant_id,
+                &request_language,
+                request_started_at_ms,
+                queue_wait_ms,
+                &response,
+            ),
+        );
         return (status_for_error(&error), Json(response));
     }
 
@@ -213,6 +568,7 @@ async fn execute_request(
                 "queue_wait_ms".to_string(),
                 permit.wait_duration_ms().to_string(),
             );
+            queue_wait_ms = permit.wait_duration_ms();
             audit.push(event);
             permit
         }
@@ -232,6 +588,17 @@ async fn execute_request(
             });
             state.execution_metrics().record_error_code(error.code());
             persist_audit(&state, &request_id, &audit);
+            persist_request_summary(
+                &state,
+                build_request_summary(
+                    &request_id,
+                    &tenant_id,
+                    &request_language,
+                    request_started_at_ms,
+                    queue_wait_ms,
+                    &response,
+                ),
+            );
             return (status_for_error(&error), Json(response));
         }
     };
@@ -261,6 +628,17 @@ async fn execute_request(
             });
             state.execution_metrics().record_response(&response);
             persist_audit(&state, &request_id, &audit);
+            persist_request_summary(
+                &state,
+                build_request_summary(
+                    &request_id,
+                    &tenant_id,
+                    &request_language,
+                    request_started_at_ms,
+                    queue_wait_ms,
+                    &response,
+                ),
+            );
             log_execution_outcome(&request_id, &tenant_id, &response);
             (StatusCode::OK, Json(response))
         }
@@ -283,6 +661,17 @@ async fn execute_request(
                 .record_lifecycle(ExecutionLifecycle::Completed);
             state.execution_metrics().record_error_code(error.code());
             persist_audit(&state, &request_id, &audit);
+            persist_request_summary(
+                &state,
+                build_request_summary(
+                    &request_id,
+                    &tenant_id,
+                    &request_language,
+                    request_started_at_ms,
+                    queue_wait_ms,
+                    &response,
+                ),
+            );
             error!(
                 request_id = sanitize_log_value(&request_id),
                 tenant_id = sanitize_log_value(&tenant_id),
@@ -612,6 +1001,133 @@ fn persist_audit(state: &AppState, request_id: &str, events: &[AuditEvent]) {
             "failed to persist audit log"
         );
     }
+}
+
+fn persist_request_summary(state: &AppState, summary: RequestSummary) {
+    if let Err(error) = state.request_summaries().persist(&summary) {
+        error!(
+            request_id = sanitize_log_value(&summary.request_id),
+            %error,
+            "failed to persist request summary"
+        );
+    }
+}
+
+fn build_request_summary(
+    request_id: &str,
+    tenant_id: &str,
+    language: &str,
+    created_at_ms: u64,
+    queue_wait_ms: u64,
+    response: &ExecuteResponse,
+) -> RequestSummary {
+    RequestSummary {
+        request_id: request_id.to_string(),
+        tenant_id: tenant_id.to_string(),
+        language: language.to_string(),
+        status: if response.error.is_some() {
+            RequestStatus::Error
+        } else {
+            RequestStatus::Success
+        },
+        error_code: response.error.as_ref().map(|error| error.code),
+        created_at_ms,
+        completed_at_ms: created_at_ms.saturating_add(response.duration_ms),
+        duration_ms: response.duration_ms,
+        queue_wait_ms,
+        stdout_truncated: response
+            .output
+            .as_ref()
+            .map(|output| output.stdout_truncated)
+            .unwrap_or(false),
+        stderr_truncated: response
+            .output
+            .as_ref()
+            .map(|output| output.stderr_truncated)
+            .unwrap_or(false),
+        runtime_language: response
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.language.clone()),
+        runtime_version: response
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.resolved_version.clone()),
+    }
+}
+
+fn admin_summary_query(
+    principal: &AuthPrincipal,
+    query: AdminRequestsQuery,
+    clamp_to_recent_failures: bool,
+) -> Result<RequestSummaryQuery, SynapseError> {
+    let requested_tenant = query.tenant_id.map(|tenant| tenant.trim().to_string());
+    if let Some(tenant_id) = requested_tenant.as_deref() {
+        if !principal.allows_tenant(tenant_id) {
+            return Err(SynapseError::TenantForbidden(
+                "token is not allowed to access the requested tenant".to_string(),
+            ));
+        }
+    }
+
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_ADMIN_LIST_LIMIT)
+        .clamp(1, MAX_ADMIN_LIST_LIMIT);
+    let status = match query.status.as_deref() {
+        Some("success") => Some(RequestStatus::Success),
+        Some("error") => Some(RequestStatus::Error),
+        Some(_) => {
+            return Err(SynapseError::InvalidInput(
+                "invalid status filter; expected success or error".to_string(),
+            ));
+        }
+        None => None,
+    };
+    let error_code = match query.error_code {
+        Some(code) => match code.parse::<synapse_core::ErrorCode>() {
+            Ok(code) => Some(code),
+            Err(()) => {
+                return Err(SynapseError::InvalidInput(
+                    "invalid error_code filter".to_string(),
+                ));
+            }
+        },
+        None => None,
+    };
+    let allowed_tenants = if principal.allows_all_tenants() {
+        None
+    } else {
+        Some(principal.allowed_tenants())
+    };
+
+    let request_id = query
+        .request_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(request_id) = request_id.as_deref() {
+        validate_request_id(request_id)?;
+    }
+
+    Ok(RequestSummaryQuery {
+        request_id,
+        tenant_id: requested_tenant.filter(|tenant| !tenant.is_empty()),
+        status: if clamp_to_recent_failures {
+            Some(RequestStatus::Error)
+        } else {
+            status
+        },
+        error_code,
+        language: query.language.map(|value| value.trim().to_string()),
+        from_created_at_ms: query.from,
+        to_created_at_ms: query.to,
+        allowed_tenants,
+        limit: Some(if clamp_to_recent_failures {
+            limit.max(10)
+        } else {
+            limit
+        }),
+    })
 }
 
 fn audit_with_error(

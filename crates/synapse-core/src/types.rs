@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 use crate::{runtimes::RuntimeInfo, AuditEvent};
 
@@ -29,7 +29,7 @@ impl ExecuteRequest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     InvalidInput,
@@ -73,6 +73,33 @@ impl fmt::Display for ErrorCode {
             Self::TenantForbidden => "tenant_forbidden",
         };
         f.write_str(value)
+    }
+}
+
+impl FromStr for ErrorCode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "invalid_input" => Ok(Self::InvalidInput),
+            "unsupported_language" => Ok(Self::UnsupportedLanguage),
+            "runtime_unavailable" => Ok(Self::RuntimeUnavailable),
+            "execution_failed" => Ok(Self::ExecutionFailed),
+            "queue_timeout" => Ok(Self::QueueTimeout),
+            "capacity_rejected" => Ok(Self::CapacityRejected),
+            "wall_timeout" => Ok(Self::WallTimeout),
+            "cpu_time_limit_exceeded" => Ok(Self::CpuTimeLimitExceeded),
+            "memory_limit_exceeded" => Ok(Self::MemoryLimitExceeded),
+            "sandbox_policy_blocked" => Ok(Self::SandboxPolicyBlocked),
+            "quota_exceeded" => Ok(Self::QuotaExceeded),
+            "rate_limited" => Ok(Self::RateLimited),
+            "audit_failed" => Ok(Self::AuditFailed),
+            "io_error" => Ok(Self::IoError),
+            "auth_required" => Ok(Self::AuthRequired),
+            "auth_invalid" => Ok(Self::AuthInvalid),
+            "tenant_forbidden" => Ok(Self::TenantForbidden),
+            _ => Err(()),
+        }
     }
 }
 

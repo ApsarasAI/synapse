@@ -1,9 +1,13 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::Deserialize;
 use synapse_core::{
-    AuditLog, ExecutionScheduler, ExecutionSchedulerConfig, Providers, RuntimeRegistry,
-    SandboxPool, SynapseConfig, SynapseError, SystemProviders, TenantQuotaConfig,
+    AuditLog, ExecutionScheduler, ExecutionSchedulerConfig, Providers, RequestSummaryStore,
+    RuntimeRegistry, SandboxPool, SynapseConfig, SynapseError, SystemProviders, TenantQuotaConfig,
     TenantQuotaManager,
 };
 
@@ -15,18 +19,21 @@ const API_TOKENS_ENV: &str = "SYNAPSE_API_TOKENS";
 pub struct AppState {
     pool: SandboxPool,
     audit_log: AuditLog,
+    request_summaries: RequestSummaryStore,
     tenant_quotas: TenantQuotaManager,
     scheduler: ExecutionScheduler,
     execution_metrics: ExecutionMetrics,
     runtime_registry: RuntimeRegistry,
     auth: ApiAuthConfig,
+    started_at_ms: u64,
 }
 
 impl AppState {
     pub fn new(pool: SandboxPool, audit_log: AuditLog, tenant_quotas: TenantQuotaManager) -> Self {
-        Self::new_with_auth(
+        Self::new_with_services_and_auth(
             pool,
             audit_log,
+            RequestSummaryStore::default(),
             tenant_quotas,
             RuntimeRegistry::default(),
             ApiAuthConfig::disabled(),
@@ -39,9 +46,10 @@ impl AppState {
         tenant_quotas: TenantQuotaManager,
         runtime_registry: RuntimeRegistry,
     ) -> Self {
-        Self::new_with_auth(
+        Self::new_with_services_and_auth(
             pool,
             audit_log,
+            RequestSummaryStore::default(),
             tenant_quotas,
             runtime_registry,
             ApiAuthConfig::disabled(),
@@ -55,6 +63,24 @@ impl AppState {
         runtime_registry: RuntimeRegistry,
         auth: ApiAuthConfig,
     ) -> Self {
+        Self::new_with_services_and_auth(
+            pool,
+            audit_log,
+            RequestSummaryStore::default(),
+            tenant_quotas,
+            runtime_registry,
+            auth,
+        )
+    }
+
+    pub fn new_with_services_and_auth(
+        pool: SandboxPool,
+        audit_log: AuditLog,
+        request_summaries: RequestSummaryStore,
+        tenant_quotas: TenantQuotaManager,
+        runtime_registry: RuntimeRegistry,
+        auth: ApiAuthConfig,
+    ) -> Self {
         let scheduler = ExecutionScheduler::new(ExecutionSchedulerConfig::new(
             pool.metrics().configured_size,
             tenant_quotas.config().max_queue_depth,
@@ -64,11 +90,17 @@ impl AppState {
         Self {
             pool,
             audit_log,
+            request_summaries,
             tenant_quotas,
             scheduler,
             execution_metrics: ExecutionMetrics::default(),
             runtime_registry,
             auth,
+            started_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
         }
     }
 
@@ -82,6 +114,10 @@ impl AppState {
 
     pub fn tenant_quotas(&self) -> &TenantQuotaManager {
         &self.tenant_quotas
+    }
+
+    pub fn request_summaries(&self) -> &RequestSummaryStore {
+        &self.request_summaries
     }
 
     pub fn scheduler(&self) -> &ExecutionScheduler {
@@ -99,14 +135,19 @@ impl AppState {
     pub fn auth(&self) -> &ApiAuthConfig {
         &self.auth
     }
+
+    pub fn started_at_ms(&self) -> u64 {
+        self.started_at_ms
+    }
 }
 
 pub fn default_state() -> AppState {
     let config = SynapseConfig::from_providers(&SystemProviders);
     let runtime_registry = RuntimeRegistry::default();
-    AppState::new_with_auth(
+    AppState::new_with_services_and_auth(
         SandboxPool::new_with_runtime_registry(config.pool_size, runtime_registry.clone()),
         AuditLog::from_providers(&SystemProviders),
+        RequestSummaryStore::from_providers(&SystemProviders),
         TenantQuotaManager::new(TenantQuotaConfig {
             max_concurrent_executions_per_tenant: config.tenant_max_concurrency,
             max_requests_per_minute: config.tenant_max_requests_per_minute,
@@ -130,6 +171,20 @@ pub struct ApiAuthConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthPrincipal {
     allowed_tenants: BTreeSet<String>,
+}
+
+impl AuthPrincipal {
+    pub fn allows_all_tenants(&self) -> bool {
+        self.allowed_tenants.contains("*")
+    }
+
+    pub fn allows_tenant(&self, tenant_id: &str) -> bool {
+        self.allows_all_tenants() || self.allowed_tenants.contains(tenant_id)
+    }
+
+    pub fn allowed_tenants(&self) -> Vec<String> {
+        self.allowed_tenants.iter().cloned().collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

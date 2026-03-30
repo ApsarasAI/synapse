@@ -101,7 +101,7 @@ impl ExecutionMetrics {
         }
 
         if let Some(error) = &response.error {
-            self.record_error_code(error.code.clone());
+            self.record_error_code(error.code);
         } else {
             self.inner.success_total.fetch_add(1, Ordering::Relaxed);
         }
