@@ -11,6 +11,12 @@ The v1 integration surface is:
 - `GET /audits/:request_id`
 - `GET /metrics`
 - `GET /execute/stream`
+- `GET /admin/overview`
+- `GET /admin/requests`
+- `GET /admin/requests/:request_id`
+- `GET /admin/requests/:request_id/audit`
+- `GET /admin/runtime`
+- `GET /admin/capacity`
 
 The contract frozen for v1 is:
 
@@ -35,6 +41,12 @@ Out of scope for v1:
   - `GET /audits/:request_id`
   - `GET /metrics`
   - `GET /execute/stream`
+  - `GET /admin/overview`
+  - `GET /admin/requests`
+  - `GET /admin/requests/:request_id`
+  - `GET /admin/requests/:request_id/audit`
+  - `GET /admin/runtime`
+  - `GET /admin/capacity`
 
 Tenant selection:
 
@@ -291,3 +303,144 @@ Representative metrics:
 - `synapse_tenant_max_concurrency`
 
 Metric names listed above are part of the v1 operational contract for release-gate and PoC validation.
+
+## Admin APIs
+
+The `/admin/*` surface is intended for a read-only operations console.
+
+Common behavior:
+
+- all admin routes use the same bearer auth rules as other protected APIs
+- tenant-scoped tokens only see records for their allowed tenants
+- wildcard tokens such as `*` may view global state
+- request ids must pass the same validation rules as `/execute`
+
+### GET /admin/overview
+
+Return dashboard data for the operations console.
+
+Response includes:
+
+- `service`: current service status, version, and process start timestamp
+- `metrics`: key execution, queue, quota, runtime, and truncation counters
+- `alerts`: lightweight alert hints derived from current counters
+- `top_error_codes`: aggregated error-code counts from recent failed requests
+- `recent_failures`: recent failed request summaries
+
+Representative example:
+
+```json
+{
+  "service": {
+    "status": "ok",
+    "version": "0.1.0",
+    "started_at_ms": 1711785600000
+  },
+  "metrics": {
+    "success_total": 120,
+    "error_total": 9,
+    "queued_total": 5,
+    "capacity_rejected_total": 1,
+    "queue_timeout_total": 0,
+    "runtime_unavailable_total": 1,
+    "wall_timeout_total": 2,
+    "cpu_time_limit_exceeded_total": 0,
+    "memory_limit_exceeded_total": 0,
+    "sandbox_policy_blocked_total": 0,
+    "rate_limited_total": 0,
+    "quota_exceeded_total": 0,
+    "stdout_truncated_total": 0,
+    "stderr_truncated_total": 0
+  },
+  "alerts": [
+    {
+      "severity": "critical",
+      "code": "runtime_unavailable",
+      "message": "runtime verification or activation requires attention",
+      "count": 1
+    }
+  ],
+  "top_error_codes": [
+    {
+      "code": "wall_timeout",
+      "count": 2
+    }
+  ],
+  "recent_failures": []
+}
+```
+
+### GET /admin/requests
+
+Return request summaries for recent executions.
+
+Supported query parameters:
+
+- `request_id`
+- `tenant_id`
+- `status=success|error`
+- `error_code`
+- `language`
+- `from`
+- `to`
+- `limit` with a server-enforced max of `200`
+
+Each item includes:
+
+- `request_id`
+- `tenant_id`
+- `language`
+- `status`
+- `error_code`
+- `created_at_ms`
+- `completed_at_ms`
+- `duration_ms`
+- `queue_wait_ms`
+- `stdout_truncated`
+- `stderr_truncated`
+- `runtime_language`
+- `runtime_version`
+
+### GET /admin/requests/:request_id
+
+Return a single request summary.
+
+Behavior notes:
+
+- `404` if the request summary does not exist
+- `404` if the record exists but is not visible to the current tenant scope
+
+### GET /admin/requests/:request_id/audit
+
+Return an envelope with `request_id` and `events` for the matching audit trail.
+
+Behavior notes:
+
+- `404` if the summary or audit log does not exist
+- `404` if the record exists but is outside the token's tenant scope
+
+### GET /admin/runtime
+
+Return runtime inventory for the control plane.
+
+Response includes:
+
+- `active`: active runtimes only
+- `installed`: all installed runtimes with `ok` or `corrupt` status
+
+### GET /admin/capacity
+
+Return scheduler capacity state for the control plane.
+
+Response includes:
+
+- `scheduler.active_total`
+- `scheduler.queued_total`
+- `scheduler.admitted_total`
+- `scheduler.rejected_total`
+- `scheduler.queue_timeout_total`
+- `scheduler.queue_wait_time_ms_total`
+- `limits.max_concurrency`
+- `limits.max_queue_depth`
+- `limits.max_queue_timeout_ms`
+- `limits.max_concurrent_executions_per_tenant`
