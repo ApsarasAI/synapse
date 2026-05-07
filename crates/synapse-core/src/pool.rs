@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::{
-    executor::{self, PreparedSandbox},
-    ExecuteRequest, ExecuteResponse, RuntimeRegistry, SynapseError,
+    sandbox::{DefaultSandboxEngine, SandboxEngine, SandboxInstance},
+    service, ExecuteRequest, ExecuteResponse, RuntimeRegistry, SynapseError,
 };
 
 const DEFAULT_POOL_SIZE: usize = 4;
@@ -24,6 +24,7 @@ pub struct SandboxPool {
 #[derive(Debug)]
 struct PoolInner {
     configured_size: usize,
+    engine: Arc<dyn SandboxEngine>,
     runtime_registry: RuntimeRegistry,
     slots: Mutex<VecDeque<PooledSandbox>>,
     next_slot_id: AtomicUsize,
@@ -42,7 +43,7 @@ struct PoolInner {
 struct PooledSandbox {
     #[allow(dead_code)]
     slot_id: usize,
-    sandbox: PreparedSandbox,
+    sandbox: Box<dyn SandboxInstance>,
 }
 
 #[derive(Debug)]
@@ -82,9 +83,22 @@ impl SandboxPool {
         configured_size: usize,
         runtime_registry: RuntimeRegistry,
     ) -> Self {
+        Self::new_with_engine_and_runtime_registry(
+            configured_size,
+            Arc::new(DefaultSandboxEngine),
+            runtime_registry,
+        )
+    }
+
+    pub fn new_with_engine_and_runtime_registry(
+        configured_size: usize,
+        engine: Arc<dyn SandboxEngine>,
+        runtime_registry: RuntimeRegistry,
+    ) -> Self {
         let configured_size = configured_size.max(1);
         let inner = Arc::new(PoolInner {
             configured_size,
+            engine,
             runtime_registry,
             slots: Mutex::new(VecDeque::with_capacity(configured_size)),
             next_slot_id: AtomicUsize::new(0),
@@ -201,15 +215,21 @@ impl SandboxLease {
     async fn execute(&mut self, request: ExecuteRequest) -> Result<ExecuteResponse, SynapseError> {
         match self.kind.as_ref() {
             Some(LeaseKind::Pooled(slot)) => {
-                executor::execute_in_prepared_with_registry(
-                    &slot.sandbox,
+                service::execute_in_instance_with_registry(
+                    slot.sandbox.as_ref(),
+                    self.inner.engine.as_ref(),
                     &self.inner.runtime_registry,
                     request,
                 )
                 .await
             }
             Some(LeaseKind::Overflow) => {
-                executor::execute_with_registry(&self.inner.runtime_registry, request).await
+                service::execute_with_engine_and_registry(
+                    self.inner.engine.as_ref(),
+                    &self.inner.runtime_registry,
+                    request,
+                )
+                .await
             }
             None => Err(SynapseError::Execution(
                 "sandbox lease was already released".to_string(),
@@ -251,7 +271,7 @@ impl PoolInner {
             return false;
         }
 
-        let Ok(sandbox) = executor::prepare_sandbox_blocking() else {
+        let Ok(sandbox) = self.engine.prepare_blocking() else {
             return false;
         };
 

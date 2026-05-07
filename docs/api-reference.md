@@ -7,6 +7,7 @@ Synapse v1 exposes a small HTTP and websocket surface for enterprise agent execu
 The v1 integration surface is:
 
 - `GET /health`
+- `GET /openapi.json`
 - `POST /execute`
 - `GET /audits/:request_id`
 - `GET /metrics`
@@ -35,8 +36,8 @@ Out of scope for v1:
 
 ## Authentication
 
-- If `SYNAPSE_API_TOKENS` is unset, auth is disabled.
-- If `SYNAPSE_API_TOKENS` is set, these routes require `Authorization: Bearer <token>`:
+- Protected routes require `Authorization: Bearer <token>` by default.
+- Configure `SYNAPSE_API_TOKENS` with one or more bearer tokens. These routes require auth:
   - `POST /execute`
   - `GET /audits/:request_id`
   - `GET /metrics`
@@ -47,6 +48,7 @@ Out of scope for v1:
   - `GET /admin/requests/:request_id/audit`
   - `GET /admin/runtime`
   - `GET /admin/capacity`
+- `GET /health` and `GET /openapi.json` do not require auth.
 
 Tenant selection:
 
@@ -58,6 +60,17 @@ Request correlation:
 - `x-synapse-request-id` is optional for `/execute`.
 - If omitted, Synapse generates one.
 - Request ids must use ASCII letters, digits, `-`, or `_`, and be at most 128 characters.
+- If both header and body provide `request_id`, the body value wins after validation.
+
+## GET /openapi.json
+
+Return the generated OpenAPI 3.1 JSON document for the current public HTTP contract.
+
+Example:
+
+```bash
+curl http://127.0.0.1:8080/openapi.json
+```
 
 ## GET /health
 
@@ -129,6 +142,8 @@ Notes:
 - `network_policy.mode = "allow_list"` is currently rejected with `sandbox_policy_blocked`
 - empty or blank `tenant_id` values normalize to `default`
 - if both payload and header provide `tenant_id`, the payload value wins after validation
+- if both payload and header provide `request_id`, the payload value wins after validation
+- malformed JSON, wrong field types, or non-JSON `content-type` return the same JSON error envelope used by other `/execute` failures
 
 Successful response example:
 
@@ -197,7 +212,9 @@ Common error codes:
 
 Observed HTTP status mapping:
 
+- `200`: successful execution only
 - `400`: `invalid_input`, `unsupported_language`
+  includes malformed JSON, wrong field types, and non-JSON `content-type`
 - `401`: `auth_required`, `auth_invalid`
 - `403`: `sandbox_policy_blocked`, `tenant_forbidden`
 - `408`: `queue_timeout`, `wall_timeout`, `cpu_time_limit_exceeded`
@@ -212,6 +229,7 @@ Observed HTTP status mapping:
 Stream one execution over websocket. The server accepts:
 
 - websocket upgrade on `GET /execute/stream`, then one initial JSON message
+- if the first websocket message is not text/binary JSON, the server emits one `error` event and closes
 
 Example:
 
@@ -301,6 +319,11 @@ Representative metrics:
 - `synapse_execute_runtime_unavailable_total`
 - `synapse_execute_audit_failed_total`
 - `synapse_tenant_max_concurrency`
+
+Behavior notes:
+
+- successful responses are `text/plain`
+- auth failures still return the standard JSON error envelope
 
 Metric names listed above are part of the v1 operational contract for release-gate and PoC validation.
 
@@ -438,6 +461,8 @@ Response includes:
 
 - `active`: active runtimes only
 - `installed`: all installed runtimes with `ok` or `corrupt` status
+- Runtime entries include language, version, command, install source, active flag, and status.
+- Runtime entries do not expose host binary paths.
 
 ### GET /admin/capacity
 

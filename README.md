@@ -10,7 +10,7 @@ This repository is the developer preview release. The goal is simple: a new cont
 
 - Run untrusted or semi-trusted Python snippets inside a constrained sandbox.
 - Keep startup fast with pooled sandboxes and a small Rust workspace.
-- Expose the minimum useful control plane: `doctor`, runtime management, `/execute`, `/audits/:request_id`, and `/metrics`.
+- Expose the minimum useful control plane: `doctor`, runtime management, `/execute`, `/audits/:request_id`, `/metrics`, and generated OpenAPI.
 - Make host requirements explicit instead of hiding them behind "works on my machine" assumptions.
 
 ## Use Cases
@@ -103,6 +103,9 @@ cargo run -p synapse-cli -- doctor
 3. Start the API.
 
 ```bash
+export SYNAPSE_API_TOKENS='[
+  {"token":"dev-token","tenants":["default"]}
+]'
 cargo run -p synapse-cli -- serve --listen 127.0.0.1:8080
 ```
 
@@ -124,6 +127,7 @@ ok
 curl \
   -X POST http://127.0.0.1:8080/execute \
   -H 'content-type: application/json' \
+  -H 'Authorization: Bearer dev-token' \
   -H 'x-synapse-request-id: hello-demo' \
   -d '{
     "language": "python",
@@ -167,13 +171,17 @@ Expected response shape:
 6. Fetch the corresponding audit record.
 
 ```bash
-curl http://127.0.0.1:8080/audits/hello-demo
+curl \
+  -H 'Authorization: Bearer dev-token' \
+  http://127.0.0.1:8080/audits/hello-demo
 ```
 
 7. Inspect metrics.
 
 ```bash
-curl http://127.0.0.1:8080/metrics | rg '^synapse_'
+curl \
+  -H 'Authorization: Bearer dev-token' \
+  http://127.0.0.1:8080/metrics | rg '^synapse_'
 ```
 
 For a fuller walkthrough, see [docs/quickstart/10-minute-quickstart.md](docs/quickstart/10-minute-quickstart.md).
@@ -201,16 +209,19 @@ Primary commands:
 Public developer-preview endpoints:
 
 - `GET /health`
+- `GET /openapi.json`
 - `POST /execute`
 - `GET /audits/:request_id`
 - `GET /metrics`
 
 Authentication behavior:
 
-- If `SYNAPSE_API_TOKENS` is unset, API auth is disabled.
-- If `SYNAPSE_API_TOKENS` is set, `/execute`, `/audits/:request_id`, `/metrics`, and `/execute/stream` require `Authorization: Bearer <token>`.
+- Protected routes require `Authorization: Bearer <token>` by default.
+- Configure `SYNAPSE_API_TOKENS` with one or more bearer tokens before calling `/execute`, `/audits/:request_id`, `/metrics`, or `/execute/stream`.
+- `GET /health` and `GET /openapi.json` remain publicly readable.
 
 See [docs/api-reference.md](docs/api-reference.md) for request, response, and error examples.
+The generated OpenAPI document is also served at `/openapi.json` and checked into [docs/openapi.json](docs/openapi.json).
 
 ## Troubleshooting
 
@@ -223,13 +234,17 @@ See [docs/api-reference.md](docs/api-reference.md) for request, response, and er
 
 - Import or install a runtime, then re-run `synapse runtime verify --language python`.
 
+`/execute` returns `wall_timeout`, `cpu_time_limit_exceeded`, or `memory_limit_exceeded`
+
+- These failures now use HTTP error status codes instead of `200 OK`: `408` for queue or time limits, `413` for memory limit exhaustion.
+
 `/execute` returns `sandbox_policy_blocked`
 
 - Current developer preview only supports `network_policy.mode = "disabled"`.
 
 `/execute` returns `queue_timeout` or `capacity_rejected`
 
-- Increase pool and tenant queue settings, or reduce concurrent requests.
+- Increase pool and tenant queue settings, or reduce concurrent requests. These map to `408` and `503` respectively.
 
 `/audits/:request_id` returns `404`
 

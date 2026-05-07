@@ -28,8 +28,10 @@
   - `slots: VecDeque<PooledSandbox>`
   - `active`, `overflow_active`, `poisoned_total`
   - `requests_total`, `completed_total`, `failed_total`, `timeouts_total`
-- `PreparedSandbox`
-  - 仅保存临时工作目录路径
+- `SandboxEngine`
+  - 描述后端能力并创建 `SandboxInstance`
+- `SandboxInstance`
+  - 封装后端私有生命周期状态，不向 service/API 暴露宿主路径
 - `PoolMetrics`
   - 只读指标快照
 
@@ -38,6 +40,7 @@
 temp dir
   -> sandbox_dir()
   -> create_sandbox_dir()
+  -> SandboxInstance
   -> write main.py
   -> execute subprocess
   -> destroy/recreate after use
@@ -48,14 +51,14 @@ temp dir
 SandboxPool
   1 -> many PooledSandbox
 PooledSandbox
-  1 -> 1 PreparedSandbox
-PreparedSandbox
-  1 -> 1 temp workspace path
+  1 -> 1 SandboxInstance
+SandboxInstance
+  1 -> 1 backend-private workspace state
 ```
 
 ## 关键文件
 - `crates/synapse-core/src/types.rs`
 - `crates/synapse-core/src/error.rs`
 - `crates/synapse-core/src/pool.rs`
-- `crates/synapse-core/src/executor.rs`
+- `crates/synapse-core/src/sandbox.rs`
 - `crates/synapse-api/src/server.rs`

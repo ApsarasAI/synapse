@@ -5,6 +5,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 use crate::{validate_request_id, ErrorCode, Providers, SynapseError, SystemProviders};
 
@@ -13,14 +14,14 @@ const DEFAULT_REQUEST_SUMMARY_DIR_NAME: &str = "synapse-request-summaries";
 const DEFAULT_QUERY_LIMIT: usize = 50;
 const MAX_QUERY_LIMIT: usize = 200;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestStatus {
     Success,
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct RequestSummary {
     pub request_id: String,
     pub tenant_id: String,
@@ -40,7 +41,8 @@ pub struct RequestSummary {
     pub runtime_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct RequestSummaryQuery {
     pub request_id: Option<String>,
     pub tenant_id: Option<String>,

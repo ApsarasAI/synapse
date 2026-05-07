@@ -23,8 +23,12 @@ use crate::cgroups::ExecutionCgroup;
 #[cfg(target_os = "linux")]
 use crate::seccomp::{self, ExportedSeccompFilter};
 use crate::{
-    find_command, syscall_audit::collect_trace_audit_events, temp_path, ExecuteResponse,
-    SynapseError, SystemProviders,
+    find_command,
+    sandbox::{
+        SandboxCapabilities, SandboxEngine, SandboxExecution, SandboxFuture, SandboxInstance,
+    },
+    syscall_audit::collect_trace_audit_events,
+    temp_path, ExecuteResponse, SynapseError, SystemProviders,
 };
 
 const OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
@@ -33,8 +37,13 @@ const SANDBOX_WORKDIR: &str = "/workspace";
 const SANDBOX_SCRIPT_PATH: &str = "/workspace/main.py";
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+pub type DefaultSandboxEngine = BubblewrapEngine;
+
+#[derive(Clone, Debug, Default)]
+pub struct BubblewrapEngine;
+
 #[derive(Clone, Debug)]
-pub struct PreparedSandbox {
+pub(crate) struct BubblewrapSandboxInstance {
     root: PathBuf,
     upper: PathBuf,
 }
@@ -67,47 +76,98 @@ impl SeccompPlan {
     }
 }
 
-impl PreparedSandbox {
+impl BubblewrapEngine {
+    #[cfg(target_os = "linux")]
+    pub fn probe(&self) -> Result<String, SynapseError> {
+        match detect_linux_sandbox_strategy()? {
+            SandboxStrategy::Bubblewrap { bwrap } => Ok(format!(
+                "bubblewrap overlay sandbox available ({})",
+                bwrap.display()
+            )),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn probe(&self) -> Result<String, SynapseError> {
+        Ok("direct process sandbox available for non-Linux development".to_string())
+    }
+}
+
+impl SandboxEngine for BubblewrapEngine {
+    fn name(&self) -> &'static str {
+        "bubblewrap"
+    }
+
+    fn capabilities(&self) -> SandboxCapabilities {
+        SandboxCapabilities {
+            network_disabled: true,
+            network_allow_list: false,
+            cpu_accounting: cfg!(target_os = "linux"),
+            memory_cgroup: cfg!(target_os = "linux"),
+            audit_capture: cfg!(target_os = "linux"),
+            warm_pooling: true,
+        }
+    }
+
+    fn prepare<'a>(&'a self) -> SandboxFuture<'a, Box<dyn SandboxInstance>> {
+        Box::pin(async move {
+            let root = sandbox_dir();
+            create_sandbox_layout(&root).await?;
+            Ok(Box::new(BubblewrapSandboxInstance::new(root)) as Box<dyn SandboxInstance>)
+        })
+    }
+
+    fn prepare_blocking(&self) -> Result<Box<dyn SandboxInstance>, SynapseError> {
+        let root = sandbox_dir();
+        create_sandbox_layout_blocking(&root)?;
+        Ok(Box::new(BubblewrapSandboxInstance::new(root)))
+    }
+}
+
+impl BubblewrapSandboxInstance {
     fn new(root: PathBuf) -> Self {
         Self {
             upper: root.join("upper"),
             root,
         }
     }
+}
 
-    pub fn path(&self) -> &Path {
-        &self.upper
+impl SandboxInstance for BubblewrapSandboxInstance {
+    fn reset<'a>(&'a self) -> SandboxFuture<'a, ()> {
+        Box::pin(async move {
+            recreate_sandbox_layout(&self.root)
+                .await
+                .map_err(Into::into)
+        })
     }
 
-    pub fn root_path(&self) -> &Path {
-        &self.root
-    }
-
-    pub async fn reset(&self) -> Result<(), SynapseError> {
-        recreate_sandbox_layout(&self.root)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub fn reset_blocking(&self) -> Result<(), SynapseError> {
+    fn reset_blocking(&self) -> Result<(), SynapseError> {
         recreate_sandbox_layout_blocking(&self.root).map_err(Into::into)
     }
 
-    pub fn destroy_blocking(self) -> Result<(), SynapseError> {
+    fn execute<'a>(
+        &'a self,
+        execution: SandboxExecution<'a>,
+    ) -> SandboxFuture<'a, ExecuteResponse> {
+        Box::pin(async move {
+            let artifact = execution.runtime.artifact();
+            execute_binary(
+                artifact.binary(),
+                artifact.workspace_lowerdir(),
+                execution.code,
+                &self.upper,
+                execution.wall_timeout_ms,
+                execution.cpu_time_limit_ms,
+                execution.memory_limit_mb,
+            )
+            .await
+        })
+    }
+
+    fn destroy_blocking(self: Box<Self>) -> Result<(), SynapseError> {
         destroy_sandbox_layout_blocking(&self.root).map_err(Into::into)
     }
-}
-
-pub async fn prepare_sandbox() -> Result<PreparedSandbox, SynapseError> {
-    let root = sandbox_dir();
-    create_sandbox_layout(&root).await?;
-    Ok(PreparedSandbox::new(root))
-}
-
-pub fn prepare_sandbox_blocking() -> Result<PreparedSandbox, SynapseError> {
-    let root = sandbox_dir();
-    create_sandbox_layout_blocking(&root)?;
-    Ok(PreparedSandbox::new(root))
 }
 
 pub(crate) async fn execute_binary(
@@ -471,12 +531,7 @@ fn sandbox_strategy() -> Result<SandboxStrategy, SynapseError> {
 
 #[cfg(target_os = "linux")]
 pub fn probe_linux_sandbox_support() -> Result<String, SynapseError> {
-    match detect_linux_sandbox_strategy()? {
-        SandboxStrategy::Bubblewrap { bwrap } => Ok(format!(
-            "bubblewrap overlay sandbox available ({})",
-            bwrap.display()
-        )),
-    }
+    BubblewrapEngine.probe()
 }
 
 #[cfg(target_os = "linux")]

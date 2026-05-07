@@ -56,8 +56,9 @@ POST /execute
   -> AppState.pool()
   -> SandboxPool::execute()
   -> SandboxLease::execute()
-  -> service::execute_in_prepared() | service::execute()
-  -> runtime::execute_binary()
+  -> service::execute_with_engine_and_registry()
+  -> SandboxEngine / SandboxInstance
+  -> runtime bubblewrap implementation
   -> Python subprocess / bubblewrap sandbox
   -> ExecuteResponse JSON
 ```
@@ -69,7 +70,8 @@ Client
   -> synapse-api::server
   -> in-memory SandboxPool
   -> service layer
-  -> runtime layer
+  -> sandbox engine abstraction
+  -> runtime bubblewrap backend
   -> OS process + temp workspace + seccomp/bwrap
 ```
 

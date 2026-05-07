@@ -1,6 +1,7 @@
-use std::{collections::BTreeSet, fs};
-
-use synapse_core::{execute_in_prepared, prepare_sandbox, ExecuteRequest, NetworkPolicy};
+use synapse_core::{
+    DefaultSandboxEngine, ExecuteRequest, NetworkPolicy, RuntimeRegistry, SandboxEngine,
+    SandboxExecution,
+};
 
 fn request(code: &str) -> ExecuteRequest {
     ExecuteRequest {
@@ -27,38 +28,48 @@ async fn python3_available() -> bool {
 }
 
 #[tokio::test]
-async fn prepared_sandbox_reset_clears_overlay_state_between_runs() {
+async fn sandbox_reset_clears_overlay_state_between_runs() {
     if !python3_available().await {
         return;
     }
 
-    let sandbox = prepare_sandbox().await.unwrap();
-    let first = execute_in_prepared(
-        &sandbox,
-        request(
-            "from pathlib import Path\nPath('/workspace/state.txt').write_text('persisted')\nprint(Path('/workspace/state.txt').read_text())\n",
-        ),
-    )
-    .await
-    .unwrap();
+    let registry = RuntimeRegistry::default();
+    let Ok(runtime) = registry.resolve("python", None) else {
+        return;
+    };
+    let engine = DefaultSandboxEngine;
+    let sandbox = engine.prepare().await.unwrap();
+    let first_request = request(
+        "from pathlib import Path\nPath('/workspace/state.txt').write_text('persisted')\nprint(Path('/workspace/state.txt').read_text())\n",
+    );
+    let first = sandbox
+        .execute(SandboxExecution {
+            runtime: &runtime,
+            code: &first_request.code,
+            wall_timeout_ms: first_request.timeout_ms,
+            cpu_time_limit_ms: first_request.effective_cpu_time_limit_ms(),
+            memory_limit_mb: first_request.memory_limit_mb,
+            network_policy: &first_request.network_policy,
+        })
+        .await
+        .unwrap();
     assert_eq!(first.stdout, "persisted\n");
 
-    let second = execute_in_prepared(
-        &sandbox,
-        request("from pathlib import Path\nprint(Path('/workspace/state.txt').exists())\n"),
-    )
-    .await
-    .unwrap();
+    sandbox.reset().await.unwrap();
+    let second_request =
+        request("from pathlib import Path\nprint(Path('/workspace/state.txt').exists())\n");
+    let second = sandbox
+        .execute(SandboxExecution {
+            runtime: &runtime,
+            code: &second_request.code,
+            wall_timeout_ms: second_request.timeout_ms,
+            cpu_time_limit_ms: second_request.effective_cpu_time_limit_ms(),
+            memory_limit_mb: second_request.memory_limit_mb,
+            network_policy: &second_request.network_policy,
+        })
+        .await
+        .unwrap();
     assert_eq!(second.stdout, "False\n");
-
-    let entries: BTreeSet<_> = fs::read_dir(sandbox.root_path())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(
-        entries,
-        BTreeSet::from(["upper".to_string(), "work".to_string()])
-    );
 
     sandbox.destroy_blocking().unwrap();
 }

@@ -747,7 +747,7 @@
             '<div class="summary-item">',
             "<strong>" + escapeHtml(item.language) + ":" + escapeHtml(item.version) + "</strong>",
             '<div class="meta"><span class="pill ' + (item.active ? "success" : "") + '">' + (item.active ? "active" : "installed") + "</span><span class=\"pill\">" + escapeHtml(item.status) + "</span></div>",
-            '<div class="meta"><span class="mono">' + escapeHtml(item.command) + "</span><span class=\"mono\">" + escapeHtml(item.path) + "</span></div>",
+            '<div class="meta"><span class="mono">' + escapeHtml(item.command) + "</span><span class=\"mono\">" + escapeHtml(item.install_source || "unknown") + "</span></div>",
             "</div>"
           ].join(""))
         : renderEmpty("No runtime inventory available.");

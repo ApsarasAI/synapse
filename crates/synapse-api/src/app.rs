@@ -165,6 +165,7 @@ pub fn default_state() -> AppState {
 #[derive(Clone, Debug, Default)]
 pub struct ApiAuthConfig {
     tokens: Arc<Vec<ApiToken>>,
+    enabled: bool,
     load_error: Option<Arc<String>>,
 }
 
@@ -207,13 +208,18 @@ impl ApiAuthConfig {
 
     pub fn from_providers(providers: &dyn Providers) -> Self {
         let Some(raw) = providers.env_var(API_TOKENS_ENV) else {
-            return Self::default();
+            return Self {
+                tokens: Arc::new(Vec::new()),
+                enabled: true,
+                load_error: None,
+            };
         };
 
         match serde_json::from_str(&raw) {
             Ok(parsed) => Self::from_documents(parsed),
             Err(error) => Self {
                 tokens: Arc::new(Vec::new()),
+                enabled: true,
                 load_error: Some(Arc::new(format!(
                     "failed to parse {API_TOKENS_ENV}: {error}"
                 ))),
@@ -258,12 +264,13 @@ impl ApiAuthConfig {
 
         Self {
             tokens: Arc::new(tokens),
+            enabled: true,
             load_error: None,
         }
     }
 
     pub fn is_enabled(&self) -> bool {
-        !self.tokens.is_empty()
+        self.enabled
     }
 
     pub fn authenticate_bearer(
@@ -357,6 +364,17 @@ mod tests {
         fn now_unix_nanos(&self) -> u128 {
             1
         }
+    }
+
+    #[test]
+    fn auth_defaults_to_enabled_without_tokens() {
+        let providers = FakeProviders::default();
+
+        let config = ApiAuthConfig::from_providers(&providers);
+
+        assert!(config.is_enabled());
+        let error = config.authenticate_bearer(None).unwrap_err();
+        assert!(matches!(error, SynapseError::AuthRequired(_)));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use synapse_core::{
-    execute_in_prepared, prepare_sandbox_blocking, ExecuteRequest, NetworkPolicy, RuntimeRegistry,
-    SandboxPool,
+    DefaultSandboxEngine, ExecuteRequest, NetworkPolicy, RuntimeRegistry, SandboxEngine,
+    SandboxExecution, SandboxPool,
 };
 
 fn bench_pool_acquire(c: &mut Criterion) {
@@ -16,8 +16,11 @@ fn bench_pool_acquire(c: &mut Criterion) {
 
 fn bench_sandbox_create(c: &mut Criterion) {
     c.bench_function("sandbox_create", |b| {
+        let engine = DefaultSandboxEngine;
         b.iter(|| {
-            let sandbox = prepare_sandbox_blocking().expect("sandbox should be created");
+            let sandbox = engine
+                .prepare_blocking()
+                .expect("sandbox should be created");
             sandbox
                 .destroy_blocking()
                 .expect("sandbox should be cleaned up");
@@ -35,11 +38,27 @@ fn bench_execute_hello(c: &mut Criterion) {
     if registry.verify("python", None).is_err() {
         return;
     }
-    let sandbox = prepare_sandbox_blocking().expect("sandbox should be created");
+    let resolved_runtime = registry
+        .resolve("python", None)
+        .expect("runtime should resolve");
+    let engine = DefaultSandboxEngine;
+    let sandbox = engine
+        .prepare_blocking()
+        .expect("sandbox should be created");
 
     c.bench_function("execute_fast_path", |b| {
         b.to_async(&runtime).iter(|| async {
-            let response = execute_in_prepared(&sandbox, request())
+            let request = request();
+            sandbox.reset().await.expect("sandbox should reset");
+            let response = sandbox
+                .execute(SandboxExecution {
+                    runtime: &resolved_runtime,
+                    code: &request.code,
+                    wall_timeout_ms: request.timeout_ms,
+                    cpu_time_limit_ms: request.effective_cpu_time_limit_ms(),
+                    memory_limit_mb: request.memory_limit_mb,
+                    network_policy: &request.network_policy,
+                })
                 .await
                 .expect("execution should succeed");
             assert_eq!(response.stdout, "hello\n");
@@ -52,7 +71,10 @@ fn bench_execute_hello(c: &mut Criterion) {
 }
 
 fn bench_sandbox_recycle(c: &mut Criterion) {
-    let sandbox = prepare_sandbox_blocking().expect("sandbox should be created");
+    let engine = DefaultSandboxEngine;
+    let sandbox = engine
+        .prepare_blocking()
+        .expect("sandbox should be created");
     c.bench_function("sandbox_recycle", |b| {
         b.iter(|| {
             sandbox.reset_blocking().expect("sandbox should be reset");

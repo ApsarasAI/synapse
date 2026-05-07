@@ -7,13 +7,14 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::{temp_path, Providers, SynapseError, SystemProviders};
 
 const AUDIT_ROOT_ENV: &str = "SYNAPSE_AUDIT_ROOT";
 const DEFAULT_AUDIT_DIR_NAME: &str = "synapse-audit";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditEventKind {
     RequestReceived,
@@ -32,7 +33,7 @@ pub enum AuditEventKind {
     ProcessSpawn,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct AuditEvent {
     pub request_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]

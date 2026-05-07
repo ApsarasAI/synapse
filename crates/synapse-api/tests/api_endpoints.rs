@@ -42,6 +42,81 @@ async fn health_returns_ok() {
 }
 
 #[tokio::test]
+async fn openapi_spec_exposes_execute_contract() {
+    let app = AppState::new_with_auth(
+        SandboxPool::new(1),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::disabled(),
+    );
+    let response = router_with_state(app)
+        .oneshot(
+            Request::builder()
+                .uri("/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["openapi"], "3.1.0");
+    assert!(body["paths"]["/execute"]["post"].is_object());
+    assert!(body["paths"]["/execute"]["post"]["responses"]["408"].is_object());
+    let parameter_names = body["paths"]["/execute"]["post"]["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(parameter_names.contains(&"x-synapse-request-id"));
+    assert!(parameter_names.contains(&"x-synapse-tenant-id"));
+    assert!(body["paths"]["/metrics"]["get"].is_object());
+    assert!(body["paths"]["/audits/{request_id}"]["get"].is_object());
+    assert!(body["paths"]["/admin/overview"]["get"].is_object());
+    assert_eq!(
+        body["paths"]["/metrics"]["get"]["responses"]["200"]["content"]["text/plain"]["schema"]
+            ["type"],
+        "string"
+    );
+    assert!(body["paths"]["/execute"]["post"]["security"].is_null());
+    assert!(body["paths"]["/metrics"]["get"]["security"].is_null());
+}
+
+#[tokio::test]
+async fn openapi_spec_requires_bearer_when_auth_is_enabled() {
+    let app = AppState::new_with_auth(
+        SandboxPool::new(1),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::from_static_tokens(&[("token-a", &["tenant-a"])]),
+    );
+    let response = router_with_state(app)
+        .oneshot(
+            Request::builder()
+                .uri("/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["paths"]["/execute"]["post"]["security"][0]["bearer_auth"],
+        json!([])
+    );
+    assert_eq!(
+        body["paths"]["/metrics"]["get"]["security"][0]["bearer_auth"],
+        json!([])
+    );
+}
+
+#[tokio::test]
 async fn execute_returns_python_output() {
     if !python3_available().await {
         return;
@@ -100,6 +175,99 @@ async fn execute_rejects_invalid_input() {
 }
 
 #[tokio::test]
+async fn execute_invalid_input_preserves_parsed_request_metadata() {
+    let app = AppState::new_with_auth(
+        SandboxPool::new(1),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::disabled(),
+    );
+    let response = router_with_state(app)
+        .oneshot(json_request(
+            "/execute",
+            json!({
+                "request_id": "req-body-123",
+                "tenant_id": "tenant-body",
+                "language": "python",
+                "code": "print('hello')\n",
+                "timeout_ms": 0,
+                "memory_limit_mb": 128
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "invalid_input");
+    assert_eq!(body["request_id"], "req-body-123");
+    assert_eq!(body["tenant_id"], "tenant-body");
+}
+
+#[tokio::test]
+async fn execute_rejects_malformed_json_with_uniform_error_body() {
+    let app = AppState::new_with_auth(
+        SandboxPool::new(1),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::disabled(),
+    );
+    let response = router_with_state(app)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/execute")
+                .header("content-type", "application/json")
+                .header("x-synapse-request-id", "malformed-json")
+                .body(Body::from("{\"language\":\"python\",\"code\":"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "invalid_input");
+    assert_eq!(body["request_id"], "malformed-json");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("invalid request body"));
+}
+
+#[tokio::test]
+async fn execute_rejects_non_json_content_type_with_uniform_error_body() {
+    let app = AppState::new_with_auth(
+        SandboxPool::new(1),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::disabled(),
+    );
+    let response = router_with_state(app)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/execute")
+                .header("content-type", "text/plain")
+                .body(Body::from("print('nope')"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "invalid_input");
+    assert_eq!(
+        body["error"]["message"],
+        "invalid input: content-type must be application/json"
+    );
+}
+
+#[tokio::test]
 async fn execute_rejects_unsupported_network_allow_list_policy() {
     let app = AppState::new_with_auth(
         SandboxPool::new(1),
@@ -150,7 +318,7 @@ async fn execute_times_out_through_http() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
     let body = json_body(response).await;
     assert_eq!(body["exit_code"], -1);
     assert!(body["stderr"]
@@ -354,7 +522,7 @@ async fn metrics_track_timeout_and_truncation_dimensions() {
         ))
         .await
         .unwrap();
-    assert_eq!(timeout_response.status(), StatusCode::OK);
+    assert_eq!(timeout_response.status(), StatusCode::REQUEST_TIMEOUT);
 
     let truncation_response = app
         .clone()
@@ -642,7 +810,7 @@ async fn audits_capture_limit_exceeded_details() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
 
     let audit_response = app
         .oneshot(
@@ -861,6 +1029,59 @@ async fn stream_websocket_reports_timeout_errors() {
 }
 
 #[tokio::test]
+async fn stream_websocket_rejects_invalid_first_frame() {
+    let app = router_with_state(AppState::new_with_auth(
+        SandboxPool::new(1),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::disabled(),
+    ));
+    let (addr, _server) = spawn_test_server(app).await;
+    let events = connect_and_collect_stream_messages(addr, Message::Ping(Vec::new())).await;
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event"], "error");
+    assert_eq!(events[0]["fields"]["error_code"], "invalid_input");
+    assert!(events[0]["fields"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("expected initial text or binary message"));
+}
+
+#[tokio::test]
+async fn stream_websocket_rejects_invalid_request_id() {
+    let app = router_with_state(AppState::new_with_auth(
+        SandboxPool::new(1),
+        AuditLog::default(),
+        TenantQuotaManager::default(),
+        RuntimeRegistry::default(),
+        ApiAuthConfig::disabled(),
+    ));
+    let (addr, _server) = spawn_test_server(app).await;
+    let events = connect_and_collect_stream_messages(
+        addr,
+        Message::Text(
+            json!({
+                "language": "python",
+                "code": "print('stream')\n",
+                "request_id": "bad$request"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event"], "error");
+    assert_eq!(events[0]["fields"]["error_code"], "invalid_input");
+    assert!(events[0]["fields"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("request_id must use only ASCII letters"));
+}
+
+#[tokio::test]
 async fn audit_lookup_returns_not_found_for_missing_record() {
     let app = AppState::new_with_auth(
         SandboxPool::new(1),
@@ -922,6 +1143,59 @@ async fn protected_routes_require_authorization_token() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "auth_required");
+}
+
+#[tokio::test]
+async fn metrics_returns_text_on_success_and_json_on_auth_failure() {
+    let public_app = router_with_state(
+        runtime_test_state(1, TenantQuotaManager::default()).unwrap_or_else(|| {
+            AppState::new_with_auth(
+                SandboxPool::new(1),
+                AuditLog::default(),
+                TenantQuotaManager::default(),
+                RuntimeRegistry::default(),
+                ApiAuthConfig::disabled(),
+            )
+        }),
+    );
+    let success = public_app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(success.status(), StatusCode::OK);
+    assert_eq!(
+        success
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/plain; charset=utf-8")
+    );
+
+    let protected_app = router_with_state(auth_test_state(1).unwrap());
+    let failure = protected_app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(failure.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        failure
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+    let body = json_body(failure).await;
     assert_eq!(body["error"]["code"], "auth_required");
 }
 
@@ -1218,6 +1492,9 @@ async fn admin_runtime_and_capacity_require_auth_and_return_payloads() {
     assert_eq!(runtime.status(), StatusCode::OK);
     let runtime_body = json_body(runtime).await;
     assert!(!runtime_body["active"].as_array().unwrap().is_empty());
+    let runtime_entry = &runtime_body["active"][0];
+    assert!(runtime_entry.get("path").is_none());
+    assert!(runtime_entry.get("install_source").is_some());
 
     let capacity = app
         .oneshot(
@@ -1419,12 +1696,13 @@ async fn spawn_test_server(app: axum::Router) -> (SocketAddr, tokio::task::JoinH
 }
 
 async fn connect_and_collect_stream_events(addr: SocketAddr, payload: Value) -> Vec<Value> {
+    connect_and_collect_stream_messages(addr, Message::Text(payload.to_string())).await
+}
+
+async fn connect_and_collect_stream_messages(addr: SocketAddr, payload: Message) -> Vec<Value> {
     let url = Url::parse(&format!("ws://{addr}/execute/stream")).unwrap();
     let (mut socket, _) = connect_async(url.as_str()).await.unwrap();
-    socket
-        .send(Message::Text(payload.to_string()))
-        .await
-        .unwrap();
+    socket.send(payload).await.unwrap();
     let mut events = Vec::new();
 
     while let Some(message) = socket.next().await {

@@ -1,11 +1,12 @@
 use std::{collections::BTreeMap, io::ErrorKind, net::SocketAddr};
 
 use axum::{
+    body::Bytes,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Json, Path, Query, Request, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
     routing::{get, post},
@@ -15,11 +16,18 @@ use serde::{Deserialize, Serialize};
 use synapse_console::admin_console_html;
 use synapse_core::{
     audit_event, new_request_id, validate_request_id, AuditEvent, AuditEventKind, ExecuteRequest,
-    ExecuteResponse, RequestStatus, RequestSummary, RequestSummaryQuery, SynapseError,
-    SystemProviders,
+    ExecuteResponse, RequestStatus, RequestSummary, RequestSummaryQuery, RuntimeInstallSource,
+    SynapseError, SystemProviders,
 };
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, instrument};
+use utoipa::{
+    openapi::{
+        security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
+        ComponentsBuilder,
+    },
+    IntoParams, Modify, OpenApi, ToSchema,
+};
 
 pub use crate::app::AppState;
 use crate::{
@@ -32,7 +40,88 @@ const REQUEST_ID_HEADER: &str = "x-synapse-request-id";
 const DEFAULT_ADMIN_LIST_LIMIT: usize = 50;
 const MAX_ADMIN_LIST_LIMIT: usize = 200;
 
-#[derive(Debug, Deserialize)]
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        health,
+        openapi_spec,
+        metrics,
+        get_audit_log,
+        admin_overview,
+        admin_console_page,
+        admin_list_requests,
+        admin_get_request,
+        admin_get_request_audit,
+        admin_runtime,
+        admin_capacity,
+        execute_request
+    ),
+    components(schemas(
+        synapse_core::ExecuteRequest,
+        synapse_core::ExecuteResponse,
+        synapse_core::ExecuteError,
+        synapse_core::ErrorCode,
+        synapse_core::NetworkPolicy,
+        synapse_core::LimitSummary,
+        synapse_core::OutputSummary,
+        synapse_core::AuditSummary,
+        synapse_core::RuntimeInfo,
+        synapse_core::RuntimeInstallSource,
+        synapse_core::AuditEvent,
+        synapse_core::AuditEventKind,
+        synapse_core::RequestStatus,
+        synapse_core::RequestSummary,
+        AdminOverviewResponse,
+        AdminServiceStatus,
+        AdminMetricsSnapshot,
+        AdminErrorCount,
+        AdminAlert,
+        AdminRequestsResponse,
+        AdminRequestAuditResponse,
+        AdminRuntimeResponse,
+        AdminRuntimeEntry,
+        AdminCapacityResponse,
+        AdminSchedulerSnapshot,
+        AdminCapacityLimits
+    )),
+    modifiers(&ApiSecurityAddon)
+)]
+struct ApiDoc;
+
+struct ApiSecurityAddon;
+
+impl Modify for ApiSecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.take().unwrap_or_else(|| {
+            ComponentsBuilder::new()
+                .security_scheme(
+                    "bearer_auth",
+                    SecurityScheme::Http(
+                        HttpBuilder::new()
+                            .scheme(HttpAuthScheme::Bearer)
+                            .bearer_format("Bearer <token>")
+                            .build(),
+                    ),
+                )
+                .build()
+        });
+
+        let mut components = components;
+        components.add_security_scheme(
+            "bearer_auth",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("Bearer <token>")
+                    .build(),
+            ),
+        );
+        openapi.components = Some(components);
+    }
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct AdminRequestsQuery {
     request_id: Option<String>,
     tenant_id: Option<String>,
@@ -44,7 +133,7 @@ struct AdminRequestsQuery {
     limit: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminOverviewResponse {
     service: AdminServiceStatus,
     metrics: AdminMetricsSnapshot,
@@ -53,14 +142,14 @@ struct AdminOverviewResponse {
     recent_failures: Vec<RequestSummary>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminServiceStatus {
     status: &'static str,
     version: &'static str,
     started_at_ms: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminMetricsSnapshot {
     success_total: u64,
     error_total: u64,
@@ -78,13 +167,13 @@ struct AdminMetricsSnapshot {
     stderr_truncated_total: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminErrorCount {
     code: String,
     count: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminAlert {
     severity: &'static str,
     code: &'static str,
@@ -92,40 +181,40 @@ struct AdminAlert {
     count: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminRequestsResponse {
     items: Vec<RequestSummary>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminRequestAuditResponse {
     request_id: String,
     events: Vec<AuditEvent>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminRuntimeResponse {
     active: Vec<AdminRuntimeEntry>,
     installed: Vec<AdminRuntimeEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminRuntimeEntry {
     language: String,
     version: String,
     command: String,
-    path: String,
+    install_source: RuntimeInstallSource,
     active: bool,
     status: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminCapacityResponse {
     scheduler: AdminSchedulerSnapshot,
     limits: AdminCapacityLimits,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminSchedulerSnapshot {
     active_total: usize,
     queued_total: usize,
@@ -135,7 +224,7 @@ struct AdminSchedulerSnapshot {
     queue_wait_time_ms_total: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AdminCapacityLimits {
     max_concurrency: usize,
     max_queue_depth: usize,
@@ -151,6 +240,7 @@ pub fn router_with_state(state: AppState) -> Router {
     let protected_layer = middleware::from_fn_with_state(state.clone(), require_bearer_auth);
     Router::new()
         .route("/health", get(health))
+        .route("/openapi.json", get(openapi_spec))
         .route(
             "/metrics",
             get(metrics).route_layer(protected_layer.clone()),
@@ -201,10 +291,81 @@ pub async fn serve(listen: SocketAddr) -> Result<(), std::io::Error> {
     axum::serve(listener, router()).await
 }
 
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Plain-text liveness probe", body = String, content_type = "text/plain")
+    )
+)]
 async fn health() -> &'static str {
     "ok"
 }
 
+pub fn openapi_document() -> utoipa::openapi::OpenApi {
+    openapi_document_for_auth(default_state().auth().is_enabled())
+}
+
+fn openapi_document_for_auth(auth_enabled: bool) -> utoipa::openapi::OpenApi {
+    let mut openapi = ApiDoc::openapi();
+    if !auth_enabled {
+        openapi.security = None;
+        for path_item in openapi.paths.paths.values_mut() {
+            clear_operation_security(path_item);
+        }
+    }
+    openapi
+}
+
+fn clear_operation_security(path_item: &mut utoipa::openapi::path::PathItem) {
+    if let Some(operation) = path_item.get.as_mut() {
+        operation.security = None;
+    }
+    if let Some(operation) = path_item.put.as_mut() {
+        operation.security = None;
+    }
+    if let Some(operation) = path_item.post.as_mut() {
+        operation.security = None;
+    }
+    if let Some(operation) = path_item.delete.as_mut() {
+        operation.security = None;
+    }
+    if let Some(operation) = path_item.options.as_mut() {
+        operation.security = None;
+    }
+    if let Some(operation) = path_item.head.as_mut() {
+        operation.security = None;
+    }
+    if let Some(operation) = path_item.patch.as_mut() {
+        operation.security = None;
+    }
+    if let Some(operation) = path_item.trace.as_mut() {
+        operation.security = None;
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/openapi.json",
+    responses(
+        (status = 200, description = "OpenAPI v3 JSON document")
+    )
+)]
+async fn openapi_spec(State(state): State<AppState>) -> Json<utoipa::openapi::OpenApi> {
+    Json(openapi_document_for_auth(state.auth().is_enabled()))
+}
+
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    responses(
+        (status = 200, description = "Prometheus metrics text", body = String, content_type = "text/plain"),
+        (status = 401, description = "Authentication required or invalid bearer token", body = ExecuteResponse, content_type = "application/json")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     render_metrics(&state)
 }
@@ -229,6 +390,24 @@ async fn require_bearer_auth(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/audits/{request_id}",
+    params(
+        ("request_id" = String, Path, description = "Execution request id"),
+        ("x-synapse-tenant-id" = Option<String>, Header, description = "Optional tenant selector used for access control")
+    ),
+    responses(
+        (status = 200, description = "Persisted audit trail", body = [AuditEvent]),
+        (status = 400, description = "Invalid request id", body = ExecuteResponse),
+        (status = 401, description = "Authentication required or invalid bearer token", body = ExecuteResponse),
+        (status = 403, description = "Tenant access forbidden", body = ExecuteResponse),
+        (status = 404, description = "Audit record not found or not visible to current tenant")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 async fn get_audit_log(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -258,6 +437,20 @@ async fn get_audit_log(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/admin/overview",
+    params(AdminRequestsQuery),
+    responses(
+        (status = 200, description = "Operations overview payload", body = AdminOverviewResponse),
+        (status = 400, description = "Invalid query parameter", body = ExecuteResponse),
+        (status = 401, description = "Authentication required or invalid bearer token", body = ExecuteResponse),
+        (status = 403, description = "Requested tenant is not visible to current token", body = ExecuteResponse)
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 async fn admin_overview(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -330,10 +523,31 @@ async fn admin_overview(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/admin/console",
+    responses(
+        (status = 200, description = "Embedded admin console HTML", body = String, content_type = "text/html")
+    )
+)]
 async fn admin_console_page(_state: State<AppState>) -> impl IntoResponse {
     axum::response::Html(admin_console_html())
 }
 
+#[utoipa::path(
+    get,
+    path = "/admin/requests",
+    params(AdminRequestsQuery),
+    responses(
+        (status = 200, description = "Filtered request summaries", body = AdminRequestsResponse),
+        (status = 400, description = "Invalid query parameter", body = ExecuteResponse),
+        (status = 401, description = "Authentication required or invalid bearer token", body = ExecuteResponse),
+        (status = 403, description = "Requested tenant is not visible to current token", body = ExecuteResponse)
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 async fn admin_list_requests(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -353,6 +567,22 @@ async fn admin_list_requests(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/admin/requests/{request_id}",
+    params(
+        ("request_id" = String, Path, description = "Execution request id")
+    ),
+    responses(
+        (status = 200, description = "Single request summary", body = RequestSummary),
+        (status = 400, description = "Invalid request id", body = ExecuteResponse),
+        (status = 401, description = "Authentication required or invalid bearer token", body = ExecuteResponse),
+        (status = 404, description = "Summary not found or not visible to current tenant")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 async fn admin_get_request(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -374,6 +604,22 @@ async fn admin_get_request(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/admin/requests/{request_id}/audit",
+    params(
+        ("request_id" = String, Path, description = "Execution request id")
+    ),
+    responses(
+        (status = 200, description = "Single request summary plus audit trail", body = AdminRequestAuditResponse),
+        (status = 400, description = "Invalid request id", body = ExecuteResponse),
+        (status = 401, description = "Authentication required or invalid bearer token", body = ExecuteResponse),
+        (status = 404, description = "Summary or audit record not found, or record hidden from current tenant")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 async fn admin_get_request_audit(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -405,6 +651,17 @@ async fn admin_get_request_audit(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/admin/runtime",
+    responses(
+        (status = 200, description = "Installed and active runtimes", body = AdminRuntimeResponse),
+        (status = 401, description = "Authentication required or invalid bearer token", body = ExecuteResponse)
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 async fn admin_runtime(
     State(state): State<AppState>,
     _principal: Extension<AuthPrincipal>,
@@ -417,7 +674,7 @@ async fn admin_runtime(
             language: runtime.language,
             version: runtime.version,
             command: runtime.command,
-            path: runtime.binary.display().to_string(),
+            install_source: runtime.install_source,
             active: runtime.active,
             status: if runtime.healthy { "ok" } else { "corrupt" },
         })
@@ -429,7 +686,7 @@ async fn admin_runtime(
             language: runtime.language.clone(),
             version: runtime.version.clone(),
             command: runtime.command.clone(),
-            path: runtime.path.clone(),
+            install_source: runtime.install_source.clone(),
             active: runtime.active,
             status: runtime.status,
         })
@@ -438,6 +695,17 @@ async fn admin_runtime(
     Json(AdminRuntimeResponse { active, installed }).into_response()
 }
 
+#[utoipa::path(
+    get,
+    path = "/admin/capacity",
+    responses(
+        (status = 200, description = "Scheduler and concurrency capacity snapshot", body = AdminCapacityResponse),
+        (status = 401, description = "Authentication required or invalid bearer token", body = ExecuteResponse)
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 async fn admin_capacity(
     State(state): State<AppState>,
     _principal: Extension<AuthPrincipal>,
@@ -463,21 +731,64 @@ async fn admin_capacity(
     .into_response()
 }
 
-#[instrument(skip(state, headers, req), fields(language = %req.language))]
+#[utoipa::path(
+    post,
+    path = "/execute",
+    request_body(
+        content = ExecuteRequest,
+        description = "Sandbox execution request",
+        content_type = "application/json"
+    ),
+    params(
+        ("x-synapse-request-id" = Option<String>, Header, description = "Optional request correlation id. Body request_id wins when both are present."),
+        ("x-synapse-tenant-id" = Option<String>, Header, description = "Optional tenant selector. Body tenant_id wins when both are present.")
+    ),
+    responses(
+        (status = 200, description = "Execution completed successfully", body = ExecuteResponse),
+        (status = 400, description = "Invalid input, invalid JSON, unsupported language, or invalid headers", body = ExecuteResponse),
+        (status = 401, description = "Authentication required or invalid bearer token", body = ExecuteResponse),
+        (status = 403, description = "Tenant access forbidden or sandbox policy blocked", body = ExecuteResponse),
+        (status = 408, description = "Queue timeout, wall timeout, or CPU time limit exceeded", body = ExecuteResponse),
+        (status = 413, description = "Memory limit exceeded", body = ExecuteResponse),
+        (status = 424, description = "Requested runtime unavailable", body = ExecuteResponse),
+        (status = 429, description = "Tenant quota exceeded or rate limited", body = ExecuteResponse),
+        (status = 500, description = "Execution, audit, or IO failure", body = ExecuteResponse),
+        (status = 503, description = "Execution capacity rejected", body = ExecuteResponse)
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+#[instrument(skip(state, headers, body), fields(language = tracing::field::Empty))]
 async fn execute_request(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthPrincipal>,
     headers: HeaderMap,
-    Json(mut req): Json<ExecuteRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<ExecuteResponse>) {
+    let mut req = match parse_execute_request(&headers, &body) {
+        Ok(req) => req,
+        Err(error) => {
+            state.execution_metrics().record_error_code(error.code());
+            return execute_error_response(&headers, &state, &principal, None, error);
+        }
+    };
+    tracing::Span::current().record("language", tracing::field::display(&req.language));
+
     if let Err(error) = hydrate_request(&mut req, &headers, &state, &principal) {
-        let status = status_for_error(&error);
         state.execution_metrics().record_error_code(error.code());
-        return (
-            status,
-            Json(ExecuteResponse::error(error.to_execute_error(), 0)),
-        );
+        return execute_error_response(&headers, &state, &principal, Some(&req), error);
     }
+
+    execute_request_inner(state, principal, headers, req).await
+}
+
+async fn execute_request_inner(
+    state: AppState,
+    _principal: AuthPrincipal,
+    _headers: HeaderMap,
+    mut req: ExecuteRequest,
+) -> (StatusCode, Json<ExecuteResponse>) {
     let request_id = req
         .request_id
         .clone()
@@ -656,7 +967,7 @@ async fn execute_request(
                 ),
             );
             log_execution_outcome(&request_id, &tenant_id, &response);
-            (StatusCode::OK, Json(response))
+            (status_for_execute_response(&response), Json(response))
         }
         Err(error) => {
             audit.push(audit_with_error(
@@ -741,7 +1052,7 @@ async fn handle_stream(
     )
     .await;
 
-    let response = execute_request(State(state), Extension(principal), headers, Json(req))
+    let response = execute_request_inner(state, principal, headers, req)
         .await
         .1
          .0;
@@ -853,6 +1164,98 @@ fn hydrate_request(
     }
 
     Ok(())
+}
+
+fn parse_execute_request(
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<ExecuteRequest, SynapseError> {
+    validate_json_content_type(headers)?;
+    serde_json::from_slice(body)
+        .map_err(|error| SynapseError::InvalidInput(format!("invalid request body: {error}")))
+}
+
+fn validate_json_content_type(headers: &HeaderMap) -> Result<(), SynapseError> {
+    let Some(content_type) = header_value(headers, header::CONTENT_TYPE.as_str()) else {
+        return Err(SynapseError::InvalidInput(
+            "content-type must be application/json".to_string(),
+        ));
+    };
+
+    let is_json = content_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .map(|value| value.eq_ignore_ascii_case("application/json"))
+        .unwrap_or(false);
+
+    if is_json {
+        Ok(())
+    } else {
+        Err(SynapseError::InvalidInput(
+            "content-type must be application/json".to_string(),
+        ))
+    }
+}
+
+fn execute_error_response(
+    headers: &HeaderMap,
+    state: &AppState,
+    principal: &AuthPrincipal,
+    request: Option<&ExecuteRequest>,
+    error: SynapseError,
+) -> (StatusCode, Json<ExecuteResponse>) {
+    let mut response = ExecuteResponse::error(error.to_execute_error(), 0);
+
+    if let Some(request_id) = request_id_for_error_response(headers, request) {
+        response.request_id = Some(request_id);
+    }
+
+    if let Some(tenant_id) = tenant_id_for_error_response(headers, state, principal, request) {
+        response.tenant_id = Some(tenant_id);
+    }
+
+    (status_for_error(&error), Json(response))
+}
+
+fn request_id_for_error_response(
+    headers: &HeaderMap,
+    request: Option<&ExecuteRequest>,
+) -> Option<String> {
+    if let Some(request_id) = request.and_then(|request| request.request_id.as_deref()) {
+        return if validate_request_id(request_id).is_ok() {
+            Some(request_id.to_string())
+        } else {
+            None
+        };
+    }
+
+    match header_value(headers, REQUEST_ID_HEADER) {
+        Some(request_id) if validate_request_id(request_id).is_ok() => Some(request_id.to_string()),
+        Some(_) => None,
+        None => Some(new_request_id(&SystemProviders)),
+    }
+}
+
+fn tenant_id_for_error_response(
+    headers: &HeaderMap,
+    state: &AppState,
+    principal: &AuthPrincipal,
+    request: Option<&ExecuteRequest>,
+) -> Option<String> {
+    if let Some(tenant_id) = request.and_then(|request| request.tenant_id.as_ref()) {
+        return Some(tenant_id.clone());
+    }
+
+    let tenant_id = state
+        .tenant_quotas()
+        .normalize_tenant_id(header_value(headers, TENANT_HEADER));
+
+    if state.auth().authorize_tenant(principal, &tenant_id).is_ok() {
+        Some(tenant_id)
+    } else {
+        None
+    }
 }
 
 fn header_value<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
@@ -1285,21 +1688,24 @@ fn prepare_execution_audit_events(
         request.memory_limit_mb.to_string(),
     );
     if let Some(runtime) = resolved_runtime {
+        let runtime_info = runtime.info();
         state
             .execution_metrics()
             .record_lifecycle(ExecutionLifecycle::RuntimeResolved);
         command_prepared
             .fields
             .insert("lifecycle".to_string(), "runtime_resolved".to_string());
+        command_prepared.fields.insert(
+            "runtime_language".to_string(),
+            runtime_info.language.clone(),
+        );
+        command_prepared.fields.insert(
+            "runtime_version".to_string(),
+            runtime_info.resolved_version.clone(),
+        );
         command_prepared
             .fields
-            .insert("runtime_language".to_string(), runtime.info.language);
-        command_prepared
-            .fields
-            .insert("runtime_version".to_string(), runtime.info.resolved_version);
-        command_prepared
-            .fields
-            .insert("command".to_string(), runtime.info.command);
+            .insert("command".to_string(), runtime_info.command.clone());
     }
 
     let mut execution_started = audit_event(
@@ -1469,6 +1875,35 @@ fn status_for_error(error: &SynapseError) -> StatusCode {
         | SynapseError::Audit(_)
         | SynapseError::Internal(_)
         | SynapseError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn status_for_execute_response(response: &ExecuteResponse) -> StatusCode {
+    let Some(error) = response.error.as_ref() else {
+        return StatusCode::OK;
+    };
+
+    match error.code {
+        synapse_core::ErrorCode::InvalidInput | synapse_core::ErrorCode::UnsupportedLanguage => {
+            StatusCode::BAD_REQUEST
+        }
+        synapse_core::ErrorCode::AuthRequired | synapse_core::ErrorCode::AuthInvalid => {
+            StatusCode::UNAUTHORIZED
+        }
+        synapse_core::ErrorCode::SandboxPolicyBlocked
+        | synapse_core::ErrorCode::TenantForbidden => StatusCode::FORBIDDEN,
+        synapse_core::ErrorCode::QueueTimeout
+        | synapse_core::ErrorCode::WallTimeout
+        | synapse_core::ErrorCode::CpuTimeLimitExceeded => StatusCode::REQUEST_TIMEOUT,
+        synapse_core::ErrorCode::MemoryLimitExceeded => StatusCode::PAYLOAD_TOO_LARGE,
+        synapse_core::ErrorCode::RuntimeUnavailable => StatusCode::FAILED_DEPENDENCY,
+        synapse_core::ErrorCode::QuotaExceeded | synapse_core::ErrorCode::RateLimited => {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+        synapse_core::ErrorCode::CapacityRejected => StatusCode::SERVICE_UNAVAILABLE,
+        synapse_core::ErrorCode::ExecutionFailed
+        | synapse_core::ErrorCode::AuditFailed
+        | synapse_core::ErrorCode::IoError => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

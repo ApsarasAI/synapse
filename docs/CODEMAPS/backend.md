@@ -3,18 +3,20 @@
 
 ## 路由
 - `GET /health` -> `health()` -> `"ok"`
+- `GET /openapi.json` -> `openapi_spec()` -> generated OpenAPI document
 - `GET /metrics` -> `metrics()` -> `render_metrics()` -> `SandboxPool::metrics()`
 - `POST /execute` -> `execute_request()` -> `SandboxPool::execute()` -> `executor`
 
 ## 请求链
 ```
 POST /execute
-  -> axum Json<ExecuteRequest>
-  -> validate inside executor
+  -> raw body parse + content-type validation
+  -> hydrate_request()
+  -> validate inside service
   -> AppState.pool().execute(req)
   -> SandboxLease::execute(req)
   -> ExecuteResponse
-  -> status mapping in server::map_error()
+  -> status mapping in server::status_for_execute_response()
 ```
 
 ## 服务 -> 核心映射
@@ -31,21 +33,26 @@ POST /execute
   - `SandboxPool::acquire()`
   - `SandboxPool::execute()`
   - `SandboxPool::metrics()`
-- `synapse-core/src/executor.rs`
+- `synapse-core/src/service.rs`
   - `execute()`
-  - `execute_in_prepared()`
-  - `prepare_sandbox()`
-  - `prepare_sandbox_blocking()`
-  - `PreparedSandbox::{reset,destroy_blocking}`
+  - `execute_with_registry()`
+  - `execute_with_engine_and_registry()`
+- `synapse-core/src/sandbox.rs`
+  - `SandboxEngine`
+  - `SandboxInstance`
+  - `SandboxExecution`
 
 ## 中间件链
-- 当前无显式 axum/tower middleware
-- `tower-http` 已在 workspace 依赖中，但代码未接入 `TraceLayer` 或 `CorsLayer`
-- 现状是直接路由 + 状态注入 + 错误映射
+- Bearer auth middleware protects `/execute`, `/metrics`, `/audits/*`, `/execute/stream`, and admin routes
+- `TraceLayer` is attached at the router level
+- request parsing errors for `/execute` are normalized into the same JSON error shape as executor failures
 
 ## 错误映射
 - `InvalidInput` -> `400 BAD_REQUEST`
 - `UnsupportedLanguage` -> `400 BAD_REQUEST`
+- `QueueTimeout` / `WallTimeout` / `CpuTimeLimitExceeded` -> `408 REQUEST_TIMEOUT`
+- `MemoryLimitExceeded` -> `413 PAYLOAD_TOO_LARGE`
+- `RuntimeUnavailable` -> `424 FAILED_DEPENDENCY`
 - `Execution` -> `500 INTERNAL_SERVER_ERROR`
 - `Io` -> `500 INTERNAL_SERVER_ERROR`
 

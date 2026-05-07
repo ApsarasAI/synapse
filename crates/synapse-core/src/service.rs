@@ -1,10 +1,10 @@
-use std::path::Path;
-
 use tracing::{info, instrument};
 
 use crate::{
-    new_request_id, runtime, ExecuteRequest, ExecuteResponse, LimitSummary, NetworkPolicy,
-    RuntimeRegistry, SynapseError, SystemProviders,
+    new_request_id,
+    sandbox::{DefaultSandboxEngine, SandboxEngine, SandboxExecution, SandboxInstance},
+    ExecuteRequest, ExecuteResponse, LimitSummary, NetworkPolicy, RuntimeRegistry, SynapseError,
+    SystemProviders,
 };
 
 #[instrument(skip(request), fields(language = %request.language, tenant_id = request.tenant_id.as_deref().unwrap_or("default")))]
@@ -15,37 +15,39 @@ pub async fn execute(request: ExecuteRequest) -> Result<ExecuteResponse, Synapse
 
 pub async fn execute_with_registry(
     registry: &RuntimeRegistry,
+    request: ExecuteRequest,
+) -> Result<ExecuteResponse, SynapseError> {
+    let engine = DefaultSandboxEngine;
+    execute_with_engine_and_registry(&engine, registry, request).await
+}
+
+pub async fn execute_with_engine_and_registry(
+    engine: &dyn SandboxEngine,
+    registry: &RuntimeRegistry,
     mut request: ExecuteRequest,
 ) -> Result<ExecuteResponse, SynapseError> {
     validate_request(&request)?;
+    validate_request_against_engine(engine, &request)?;
     let request_id = request
         .request_id
         .clone()
         .unwrap_or_else(|| new_request_id(&SystemProviders));
     request.request_id = Some(request_id.clone());
 
-    let sandbox = runtime::prepare_sandbox().await?;
-    let result = execute_in_prepared_with_registry(&sandbox, registry, request).await;
-    let _ = sandbox.destroy_blocking();
+    let runtime = resolve_runtime(registry, &request)?;
+    let result = execute_with_runtime(engine, &request, &runtime).await;
     info!(request_id, "execution finished in disposable sandbox");
     result
 }
 
-#[instrument(skip(sandbox, request), fields(language = %request.language, request_id = request.request_id.as_deref().unwrap_or("generated")))]
-pub async fn execute_in_prepared(
-    sandbox: &runtime::PreparedSandbox,
-    request: ExecuteRequest,
-) -> Result<ExecuteResponse, SynapseError> {
-    let registry = RuntimeRegistry::default();
-    execute_in_prepared_with_registry(sandbox, &registry, request).await
-}
-
-pub async fn execute_in_prepared_with_registry(
-    sandbox: &runtime::PreparedSandbox,
+pub(crate) async fn execute_in_instance_with_registry(
+    sandbox: &dyn SandboxInstance,
+    engine: &dyn SandboxEngine,
     registry: &RuntimeRegistry,
     mut request: ExecuteRequest,
 ) -> Result<ExecuteResponse, SynapseError> {
     validate_request(&request)?;
+    validate_request_against_engine(engine, &request)?;
     let request_id = request
         .request_id
         .clone()
@@ -54,28 +56,52 @@ pub async fn execute_in_prepared_with_registry(
     sandbox.reset().await?;
 
     let runtime = resolve_runtime(registry, &request)?;
-    let result = execute_in_sandbox(sandbox.path(), &request, &runtime).await;
+    let result = execute_on_instance(sandbox, &request, &runtime).await;
     match sandbox.reset().await {
         Ok(()) => result,
         Err(error) => Err(error),
     }
 }
 
-async fn execute_in_sandbox(
-    sandbox_dir: &Path,
+async fn execute_with_runtime(
+    engine: &dyn SandboxEngine,
     request: &ExecuteRequest,
     runtime: &crate::ResolvedRuntime,
 ) -> Result<ExecuteResponse, SynapseError> {
-    let mut response = runtime::execute_binary(
-        &runtime.binary,
-        &runtime.workspace_lowerdir,
-        &request.code,
-        sandbox_dir,
-        request.timeout_ms,
-        request.effective_cpu_time_limit_ms(),
-        request.memory_limit_mb,
-    )
-    .await?;
+    let execution = sandbox_execution(request, runtime);
+    let response = engine.execute_disposable(execution).await?;
+    attach_request_metadata(response, request, runtime)
+}
+
+async fn execute_on_instance(
+    sandbox: &dyn SandboxInstance,
+    request: &ExecuteRequest,
+    runtime: &crate::ResolvedRuntime,
+) -> Result<ExecuteResponse, SynapseError> {
+    let execution = sandbox_execution(request, runtime);
+    let response = sandbox.execute(execution).await?;
+    attach_request_metadata(response, request, runtime)
+}
+
+fn sandbox_execution<'a>(
+    request: &'a ExecuteRequest,
+    runtime: &'a crate::ResolvedRuntime,
+) -> SandboxExecution<'a> {
+    SandboxExecution {
+        runtime,
+        code: &request.code,
+        wall_timeout_ms: request.timeout_ms,
+        cpu_time_limit_ms: request.effective_cpu_time_limit_ms(),
+        memory_limit_mb: request.memory_limit_mb,
+        network_policy: &request.network_policy,
+    }
+}
+
+fn attach_request_metadata(
+    mut response: ExecuteResponse,
+    request: &ExecuteRequest,
+    runtime: &crate::ResolvedRuntime,
+) -> Result<ExecuteResponse, SynapseError> {
     for event in &mut response.sandbox_audit {
         event.request_id = request
             .request_id
@@ -90,13 +116,45 @@ async fn execute_in_sandbox(
             .clone()
             .unwrap_or_else(|| new_request_id(&SystemProviders)),
         request.tenant_id.as_deref(),
-        Some(runtime.info.clone()),
+        Some(runtime.info().clone()),
         LimitSummary {
             wall_time_limit_ms: request.timeout_ms,
             cpu_time_limit_ms: request.effective_cpu_time_limit_ms(),
             memory_limit_mb: request.memory_limit_mb,
         },
     ))
+}
+
+fn validate_request_against_engine(
+    engine: &dyn SandboxEngine,
+    request: &ExecuteRequest,
+) -> Result<(), SynapseError> {
+    let capabilities = engine.capabilities();
+    match &request.network_policy {
+        NetworkPolicy::Disabled if capabilities.network_disabled => {}
+        NetworkPolicy::Disabled => {
+            return Err(SynapseError::SandboxPolicy(format!(
+                "network disabled mode is not supported by the {} sandbox backend",
+                engine.name()
+            )));
+        }
+        NetworkPolicy::AllowList { .. } if capabilities.network_allow_list => {}
+        NetworkPolicy::AllowList { .. } => {
+            return Err(SynapseError::SandboxPolicy(format!(
+                "network allow_list mode is not supported by the {} sandbox backend",
+                engine.name()
+            )));
+        }
+    }
+
+    if request.effective_cpu_time_limit_ms() < request.timeout_ms && !capabilities.cpu_accounting {
+        return Err(SynapseError::RuntimeUnavailable(format!(
+            "cpu_time_limit_ms below timeout_ms requires CPU accounting support in the {} sandbox backend",
+            engine.name()
+        )));
+    }
+
+    Ok(())
 }
 
 fn validate_request(request: &ExecuteRequest) -> Result<(), SynapseError> {
@@ -131,12 +189,7 @@ fn validate_request(request: &ExecuteRequest) -> Result<(), SynapseError> {
                 "network allow_list policy requires at least one host".to_string(),
             ));
         }
-        NetworkPolicy::AllowList { .. } => {
-            return Err(SynapseError::SandboxPolicy(
-                "network allow_list mode is not supported by the current sandbox backend"
-                    .to_string(),
-            ));
-        }
+        NetworkPolicy::AllowList { .. } => {}
     }
 
     Ok(())
@@ -151,8 +204,10 @@ fn resolve_runtime(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_runtime, validate_request};
-    use crate::{ExecuteRequest, NetworkPolicy, RuntimeRegistry, SynapseError};
+    use super::{resolve_runtime, validate_request, validate_request_against_engine};
+    use crate::{
+        sandbox::DefaultSandboxEngine, ExecuteRequest, NetworkPolicy, RuntimeRegistry, SynapseError,
+    };
     use std::{env, fs, path::PathBuf};
 
     fn request() -> ExecuteRequest {
@@ -261,13 +316,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_rejects_unsupported_network_allow_list() {
+    fn engine_capabilities_reject_unsupported_network_allow_list() {
         let mut request = request();
         request.network_policy = NetworkPolicy::AllowList {
             hosts: vec!["example.com:443".to_string()],
         };
 
-        let error = validate_request(&request).unwrap_err();
+        validate_request(&request).unwrap();
+        let error = validate_request_against_engine(&DefaultSandboxEngine, &request).unwrap_err();
         assert!(
             matches!(error, SynapseError::SandboxPolicy(message) if message.contains("allow_list mode"))
         );
@@ -281,7 +337,7 @@ mod tests {
         alias_request.language = "  PyThOn3  ".to_string();
         let python3 = resolve_runtime(&registry, &alias_request).unwrap();
 
-        assert_eq!(python.info.language, python3.info.language);
+        assert_eq!(python.info().language, python3.info().language);
         let _ = fs::remove_dir_all(registry.root());
     }
 

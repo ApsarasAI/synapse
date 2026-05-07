@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
+use utoipa::ToSchema;
 
 use crate::{runtimes::RuntimeInfo, AuditEvent};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ExecuteRequest {
     pub language: String,
     pub code: String,
@@ -29,7 +30,7 @@ impl ExecuteRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     InvalidInput,
@@ -103,7 +104,7 @@ impl FromStr for ErrorCode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum NetworkPolicy {
     #[default]
@@ -113,32 +114,32 @@ pub enum NetworkPolicy {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct ExecuteError {
     pub code: ErrorCode,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct LimitSummary {
     pub wall_time_limit_ms: u64,
     pub cpu_time_limit_ms: u64,
     pub memory_limit_mb: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct OutputSummary {
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct AuditSummary {
     pub request_id: String,
     pub event_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ExecuteResponse {
     pub stdout: String,
     pub stderr: String,

@@ -41,16 +41,13 @@ cargo run -p synapse-cli -- runtime verify --language python
 ## 4. 启动服务
 
 ```bash
-cargo run -p synapse-cli -- serve --listen 127.0.0.1:8080
-```
-
-如果需要鉴权，配置：
-
-```bash
 export SYNAPSE_API_TOKENS='[
   {"token":"poc-token","tenants":["default"]}
 ]'
+cargo run -p synapse-cli -- serve --listen 127.0.0.1:8080
 ```
+
+默认启用鉴权，未配置 token 时无法访问受保护接口。
 
 ## 5. 验证最小路径
 
@@ -58,6 +55,12 @@ export SYNAPSE_API_TOKENS='[
 
 ```bash
 curl http://127.0.0.1:8080/health
+```
+
+查看生成的 OpenAPI 契约：
+
+```bash
+curl http://127.0.0.1:8080/openapi.json | jq '.paths["/execute"].post'
 ```
 
 执行请求：
@@ -132,6 +135,14 @@ print(response["stdout"])
 `runtime_unavailable`
 
 - 重新执行 runtime 导入与验证
+
+`wall_timeout`、`cpu_time_limit_exceeded`、`queue_timeout`
+
+- 当前会返回 HTTP `408`，并在响应 JSON 中继续包含 `error.code`
+
+`memory_limit_exceeded`
+
+- 当前会返回 HTTP `413`
 
 `sandbox_policy_blocked`
 

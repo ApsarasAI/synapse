@@ -8,6 +8,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use utoipa::ToSchema;
 
 use crate::{find_command, Providers, SynapseError, SystemProviders};
 
@@ -18,7 +19,7 @@ const SUPPORTED_PYTHON_LANGUAGE: &str = "python";
 const DEFAULT_PYTHON_COMMAND: &str = "python3";
 const DEFAULT_BUNDLE_VERSION: &str = "bundle";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeInstallSource {
     Manual,
@@ -26,7 +27,7 @@ pub enum RuntimeInstallSource {
     HostImport,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct RuntimeInfo {
     pub language: String,
     pub requested_version: Option<String>,
@@ -36,9 +37,34 @@ pub struct RuntimeInfo {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedRuntime {
-    pub binary: PathBuf,
-    pub workspace_lowerdir: PathBuf,
-    pub info: RuntimeInfo,
+    artifact: RuntimeArtifact,
+    info: RuntimeInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeArtifact {
+    binary: PathBuf,
+    workspace_lowerdir: PathBuf,
+}
+
+impl RuntimeArtifact {
+    pub fn binary(&self) -> &Path {
+        &self.binary
+    }
+
+    pub fn workspace_lowerdir(&self) -> &Path {
+        &self.workspace_lowerdir
+    }
+}
+
+impl ResolvedRuntime {
+    pub fn artifact(&self) -> &RuntimeArtifact {
+        &self.artifact
+    }
+
+    pub fn info(&self) -> &RuntimeInfo {
+        &self.info
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,8 +136,10 @@ impl RuntimeRegistry {
         let binary = manifest_binary_path(&runtime_dir, &manifest)?;
 
         Ok(ResolvedRuntime {
-            binary,
-            workspace_lowerdir: runtime_dir,
+            artifact: RuntimeArtifact {
+                binary,
+                workspace_lowerdir: runtime_dir,
+            },
             info: RuntimeInfo {
                 language: manifest.language,
                 requested_version: requested_version
@@ -746,8 +774,8 @@ mod tests {
         assert!(activated.active);
 
         let resolved = registry.resolve("python", None).unwrap();
-        assert_eq!(resolved.info.resolved_version, "3.11.9");
-        assert!(resolved.binary.ends_with("python3"));
+        assert_eq!(resolved.info().resolved_version, "3.11.9");
+        assert!(resolved.artifact().binary().ends_with("python3"));
 
         let listed = registry.list();
         assert_eq!(listed.len(), 1);
@@ -841,7 +869,7 @@ mod tests {
         fs::write(&binary, b"changed").unwrap();
 
         let resolved = registry.resolve("python", Some("3.12.1")).unwrap();
-        assert_eq!(installed.binary, resolved.binary);
+        assert_eq!(installed.binary, resolved.artifact().binary());
         assert!(installed
             .binary
             .starts_with(root.join("runtimes/python/3.12.1")));
@@ -884,8 +912,8 @@ mod tests {
 
         registry.activate("python", "3.12.4").unwrap();
         let resolved = registry.resolve("python", None).unwrap();
-        assert_eq!(resolved.info.resolved_version, "3.12.4");
-        assert!(resolved.binary.ends_with("python3"));
+        assert_eq!(resolved.info().resolved_version, "3.12.4");
+        assert!(resolved.artifact().binary().ends_with("python3"));
 
         let _ = fs::remove_dir_all(root);
     }
