@@ -10,6 +10,7 @@ libc = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
+synapse-engine = { path = "../synapse-engine" }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

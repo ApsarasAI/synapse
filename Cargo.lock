@@ -1301,10 +1301,20 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "synapse-engine",
  "thiserror",
  "tokio",
  "tracing",
  "utoipa",
+]
+
+[[package]]
+name = "synapse-engine"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

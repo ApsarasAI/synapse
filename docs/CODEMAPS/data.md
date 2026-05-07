@@ -29,17 +29,17 @@
   - `active`, `overflow_active`, `poisoned_total`
   - `requests_total`, `completed_total`, `failed_total`, `timeouts_total`
 - `SandboxEngine`
-  - 描述后端能力并创建 `SandboxInstance`
+  - 由 `synapse-engine` 定义，描述后端能力并创建 `SandboxInstance`
 - `SandboxInstance`
-  - 封装后端私有生命周期状态，不向 service/API 暴露宿主路径
+  - 由 `synapse-engine` 实现，封装后端私有生命周期状态，不向 service/API 暴露宿主路径
 - `PoolMetrics`
   - 只读指标快照
 
 ## 文件/目录数据流
 ```
 temp dir
-  -> sandbox_dir()
-  -> create_sandbox_dir()
+  -> synapse-engine sandbox_dir()
+  -> synapse-engine create_sandbox_dir()
   -> SandboxInstance
   -> write main.py
   -> execute subprocess
@@ -61,4 +61,6 @@ SandboxInstance
 - `crates/synapse-core/src/error.rs`
 - `crates/synapse-core/src/pool.rs`
 - `crates/synapse-core/src/sandbox.rs`
+- `crates/synapse-engine/src/lib.rs`
+- `crates/synapse-engine/src/runtime.rs`
 - `crates/synapse-api/src/server.rs`

@@ -38,9 +38,14 @@ POST /execute
   - `execute_with_registry()`
   - `execute_with_engine_and_registry()`
 - `synapse-core/src/sandbox.rs`
+  - engine public re-export
+- `synapse-engine/src/lib.rs`
   - `SandboxEngine`
   - `SandboxInstance`
   - `SandboxExecution`
+- `synapse-engine/src/runtime.rs`
+  - `BubblewrapEngine`
+  - process execution, output capture, timeout/resource limit classification
 
 ## 中间件链
 - Bearer auth middleware protects `/execute`, `/metrics`, `/audits/*`, `/execute/stream`, and admin routes
@@ -62,3 +67,4 @@ POST /execute
 - `crates/synapse-api/tests/security_execute.rs`
 - `crates/synapse-core/src/pool.rs`
 - `crates/synapse-core/src/executor.rs`
+- `crates/synapse-engine/src/runtime.rs`

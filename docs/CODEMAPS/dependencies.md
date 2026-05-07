@@ -19,7 +19,7 @@
 
 ## 工作区内部依赖
 ```
-synapse-cli -> synapse-api -> synapse-core
+synapse-cli -> synapse-api -> synapse-core -> synapse-engine
 synapse-api -> synapse-console
 synapse-api  -> synapse-core
 ```
@@ -29,7 +29,9 @@ synapse-api  -> synapse-core
 - `synapse-core::error`
 - `synapse-core::executor`
 - `synapse-core::pool`
-- `synapse-core::seccomp`
+- `synapse-engine::runtime`
+- `synapse-engine::seccomp`
+- `synapse-engine::cgroups`
 
 ## 未使用的潜在依赖
 - 当前没有数据库

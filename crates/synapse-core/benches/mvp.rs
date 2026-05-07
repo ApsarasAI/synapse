@@ -1,7 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use synapse_core::{
-    DefaultSandboxEngine, ExecuteRequest, NetworkPolicy, RuntimeRegistry, SandboxEngine,
-    SandboxExecution, SandboxPool,
+    DefaultSandboxEngine, EngineNetworkPolicy, EngineRuntimeArtifact, ExecuteRequest,
+    NetworkPolicy, RuntimeRegistry, SandboxEngine, SandboxExecution, SandboxPool,
 };
 
 fn bench_pool_acquire(c: &mut Criterion) {
@@ -41,6 +41,14 @@ fn bench_execute_hello(c: &mut Criterion) {
     let resolved_runtime = registry
         .resolve("python", None)
         .expect("runtime should resolve");
+    let runtime_artifact = EngineRuntimeArtifact::new(
+        resolved_runtime.artifact().binary().to_path_buf(),
+        resolved_runtime
+            .artifact()
+            .workspace_lowerdir()
+            .to_path_buf(),
+        resolved_runtime.info().command.clone(),
+    );
     let engine = DefaultSandboxEngine;
     let sandbox = engine
         .prepare_blocking()
@@ -52,12 +60,12 @@ fn bench_execute_hello(c: &mut Criterion) {
             sandbox.reset().await.expect("sandbox should reset");
             let response = sandbox
                 .execute(SandboxExecution {
-                    runtime: &resolved_runtime,
+                    runtime: &runtime_artifact,
                     code: &request.code,
                     wall_timeout_ms: request.timeout_ms,
                     cpu_time_limit_ms: request.effective_cpu_time_limit_ms(),
                     memory_limit_mb: request.memory_limit_mb,
-                    network_policy: &request.network_policy,
+                    network_policy: EngineNetworkPolicy::Disabled,
                 })
                 .await
                 .expect("execution should succeed");

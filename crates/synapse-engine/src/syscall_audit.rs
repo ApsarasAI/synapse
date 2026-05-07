@@ -3,13 +3,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{audit_event, AuditEvent, AuditEventKind};
+use crate::{sandbox_audit_event, SandboxAuditEvent, SandboxAuditKind};
 
 pub fn collect_trace_audit_events(
     request_id: &str,
     tenant_id: Option<&str>,
     trace_prefix: &Path,
-) -> Vec<AuditEvent> {
+) -> Vec<SandboxAuditEvent> {
     let Some(parent) = trace_prefix.parent() else {
         return Vec::new();
     };
@@ -47,7 +47,12 @@ pub fn collect_trace_audit_events(
     events
 }
 
-fn parse_strace_line(request_id: &str, tenant_id: Option<&str>, line: &str) -> Option<AuditEvent> {
+fn parse_strace_line(
+    request_id: &str,
+    tenant_id: Option<&str>,
+    line: &str,
+) -> Option<SandboxAuditEvent> {
+    let _ = (request_id, tenant_id);
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
@@ -66,7 +71,7 @@ fn parse_strace_line(request_id: &str, tenant_id: Option<&str>, line: &str) -> O
         return Some(syscall_event(
             request_id,
             tenant_id,
-            AuditEventKind::FileAccess,
+            SandboxAuditKind::FileAccess,
             format!("sandbox file {action}"),
             &[
                 ("syscall", syscall_name(trimmed)),
@@ -86,7 +91,7 @@ fn parse_strace_line(request_id: &str, tenant_id: Option<&str>, line: &str) -> O
         return Some(syscall_event(
             request_id,
             tenant_id,
-            AuditEventKind::NetworkAttempt,
+            SandboxAuditKind::NetworkAttempt,
             "sandbox network attempt".to_string(),
             &[("syscall", syscall_name(trimmed)), ("target", target)],
         ));
@@ -106,7 +111,7 @@ fn parse_strace_line(request_id: &str, tenant_id: Option<&str>, line: &str) -> O
         return Some(syscall_event(
             request_id,
             tenant_id,
-            AuditEventKind::ProcessSpawn,
+            SandboxAuditKind::ProcessSpawn,
             "sandbox process spawn attempt".to_string(),
             &fields,
         ));
@@ -118,17 +123,18 @@ fn parse_strace_line(request_id: &str, tenant_id: Option<&str>, line: &str) -> O
 fn syscall_event(
     request_id: &str,
     tenant_id: Option<&str>,
-    kind: AuditEventKind,
+    kind: SandboxAuditKind,
     message: String,
     fields: &[(&str, String)],
-) -> AuditEvent {
-    let mut event = audit_event(request_id.to_string(), tenant_id, kind, message);
+) -> SandboxAuditEvent {
+    let _ = (request_id, tenant_id);
+    let mut fields_map = std::collections::BTreeMap::new();
     for (key, value) in fields {
         if !value.is_empty() {
-            event.fields.insert((*key).to_string(), value.clone());
+            fields_map.insert((*key).to_string(), value.clone());
         }
     }
-    event
+    sandbox_audit_event(kind, message, fields_map)
 }
 
 fn starts_with_any(value: &str, prefixes: &[&str]) -> bool {
@@ -181,7 +187,7 @@ fn extract_network_target(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::parse_strace_line;
-    use crate::AuditEventKind;
+    use crate::SandboxAuditKind;
 
     #[test]
     fn parses_file_access_lines() {
@@ -191,7 +197,7 @@ mod tests {
             "openat(AT_FDCWD, \"/workspace/main.py\", O_RDONLY|O_CLOEXEC) = 3",
         )
         .unwrap();
-        assert_eq!(event.kind, AuditEventKind::FileAccess);
+        assert_eq!(event.kind, SandboxAuditKind::FileAccess);
         assert_eq!(event.fields["path"], "/workspace/main.py");
         assert_eq!(event.fields["action"], "read");
     }
@@ -204,7 +210,7 @@ mod tests {
             "connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr(\"1.1.1.1\")}, 16) = -1 EPERM (Operation not permitted)",
         )
         .unwrap();
-        assert_eq!(event.kind, AuditEventKind::NetworkAttempt);
+        assert_eq!(event.kind, SandboxAuditKind::NetworkAttempt);
         assert_eq!(event.fields["target"], "1.1.1.1:80");
     }
 
@@ -246,7 +252,7 @@ mod tests {
             "execve(\"/bin/sh\", [\"sh\"], 0x0) = -1 EPERM (Operation not permitted)",
         )
         .unwrap();
-        assert_eq!(event.kind, AuditEventKind::ProcessSpawn);
+        assert_eq!(event.kind, SandboxAuditKind::ProcessSpawn);
         assert_eq!(event.fields["path"], "/bin/sh");
     }
 }

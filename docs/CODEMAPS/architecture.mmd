@@ -19,10 +19,14 @@ flowchart TB
 
   subgraph CORE[synapse-core]
     P[SandboxPool\nmetrics + pooling]
-    X[executor.rs\nvalidate + sandbox + run]
+    X[service.rs\nvalidate + orchestration]
     T[types.rs\nExecuteRequest/Response]
     ER[error.rs\nSynapseError]
-    S[seccomp.rs\nlinux-only sandbox policy]
+  end
+
+  subgraph ENGINE[synapse-engine]
+    SE[SandboxEngine\ntrait + BubblewrapEngine]
+    S[seccomp/cgroups/syscall audit\nlinux sandbox policy]
   end
 
   subgraph OS[OS / Runtime]
@@ -43,10 +47,11 @@ flowchart TB
   P --> X
   X --> T
   X --> ER
-  X --> S
-  X --> PY
-  X --> TMP
-  X --> B
+  X --> SE
+  SE --> S
+  SE --> PY
+  SE --> TMP
+  SE --> B
 
   classDef note fill:#f8f8f8,stroke:#bbb,color:#222;
-  class CLI,API,CONSOLE,CORE,OS note;
+  class CLI,API,CONSOLE,CORE,ENGINE,OS note;

@@ -1,10 +1,14 @@
 use tracing::{info, instrument};
 
 use crate::{
-    new_request_id,
-    sandbox::{DefaultSandboxEngine, SandboxEngine, SandboxExecution, SandboxInstance},
-    ExecuteRequest, ExecuteResponse, LimitSummary, NetworkPolicy, RuntimeRegistry, SynapseError,
-    SystemProviders,
+    audit_event, new_request_id,
+    sandbox::{
+        DefaultSandboxEngine, EngineNetworkPolicy, EngineRuntimeArtifact, SandboxAuditEvent,
+        SandboxAuditKind, SandboxEngine, SandboxErrorKind, SandboxExecution, SandboxInstance,
+        SandboxOutput,
+    },
+    AuditEvent, AuditEventKind, ExecuteRequest, ExecuteResponse, LimitSummary, NetworkPolicy,
+    OutputSummary, RuntimeRegistry, SynapseError, SystemProviders,
 };
 
 #[instrument(skip(request), fields(language = %request.language, tenant_id = request.tenant_id.as_deref().unwrap_or("default")))]
@@ -53,11 +57,11 @@ pub(crate) async fn execute_in_instance_with_registry(
         .clone()
         .unwrap_or_else(|| new_request_id(&SystemProviders));
     request.request_id = Some(request_id.clone());
-    sandbox.reset().await?;
+    sandbox.reset().await.map_err(SynapseError::from)?;
 
     let runtime = resolve_runtime(registry, &request)?;
     let result = execute_on_instance(sandbox, &request, &runtime).await;
-    match sandbox.reset().await {
+    match sandbox.reset().await.map_err(SynapseError::from) {
         Ok(()) => result,
         Err(error) => Err(error),
     }
@@ -68,7 +72,8 @@ async fn execute_with_runtime(
     request: &ExecuteRequest,
     runtime: &crate::ResolvedRuntime,
 ) -> Result<ExecuteResponse, SynapseError> {
-    let execution = sandbox_execution(request, runtime);
+    let artifact = engine_runtime_artifact(runtime);
+    let execution = sandbox_execution(request, &artifact);
     let response = engine.execute_disposable(execution).await?;
     attach_request_metadata(response, request, runtime)
 }
@@ -78,14 +83,15 @@ async fn execute_on_instance(
     request: &ExecuteRequest,
     runtime: &crate::ResolvedRuntime,
 ) -> Result<ExecuteResponse, SynapseError> {
-    let execution = sandbox_execution(request, runtime);
+    let artifact = engine_runtime_artifact(runtime);
+    let execution = sandbox_execution(request, &artifact);
     let response = sandbox.execute(execution).await?;
     attach_request_metadata(response, request, runtime)
 }
 
 fn sandbox_execution<'a>(
     request: &'a ExecuteRequest,
-    runtime: &'a crate::ResolvedRuntime,
+    runtime: &'a EngineRuntimeArtifact,
 ) -> SandboxExecution<'a> {
     SandboxExecution {
         runtime,
@@ -93,22 +99,59 @@ fn sandbox_execution<'a>(
         wall_timeout_ms: request.timeout_ms,
         cpu_time_limit_ms: request.effective_cpu_time_limit_ms(),
         memory_limit_mb: request.memory_limit_mb,
-        network_policy: &request.network_policy,
+        network_policy: engine_network_policy(&request.network_policy),
+    }
+}
+
+fn engine_runtime_artifact(runtime: &crate::ResolvedRuntime) -> EngineRuntimeArtifact {
+    EngineRuntimeArtifact::new(
+        runtime.artifact().binary().to_path_buf(),
+        runtime.artifact().workspace_lowerdir().to_path_buf(),
+        runtime.info().command.clone(),
+    )
+}
+
+fn engine_network_policy(policy: &NetworkPolicy) -> EngineNetworkPolicy<'_> {
+    match policy {
+        NetworkPolicy::Disabled => EngineNetworkPolicy::Disabled,
+        NetworkPolicy::AllowList { hosts } => EngineNetworkPolicy::AllowList { hosts },
     }
 }
 
 fn attach_request_metadata(
-    mut response: ExecuteResponse,
+    response: SandboxOutput,
     request: &ExecuteRequest,
     runtime: &crate::ResolvedRuntime,
 ) -> Result<ExecuteResponse, SynapseError> {
-    for event in &mut response.sandbox_audit {
-        event.request_id = request
-            .request_id
-            .clone()
-            .unwrap_or_else(|| new_request_id(&SystemProviders));
-        event.tenant_id = request.tenant_id.clone();
-    }
+    let request_id = request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| new_request_id(&SystemProviders));
+    let sandbox_audit = response
+        .sandbox_audit
+        .into_iter()
+        .map(|event| core_audit_event(event, &request_id, request.tenant_id.as_deref()))
+        .collect();
+    let response = ExecuteResponse {
+        stdout: response.stdout,
+        stderr: response.stderr,
+        exit_code: response.exit_code,
+        duration_ms: response.duration_ms,
+        request_id: None,
+        tenant_id: None,
+        runtime: None,
+        limits: None,
+        output: Some(OutputSummary {
+            stdout_truncated: response.output.stdout_truncated,
+            stderr_truncated: response.output.stderr_truncated,
+        }),
+        error: response
+            .error
+            .map(sandbox_error_kind_to_synapse_error)
+            .map(|error| error.to_execute_error()),
+        audit: None,
+        sandbox_audit,
+    };
 
     Ok(response.with_request_metadata(
         request
@@ -123,6 +166,40 @@ fn attach_request_metadata(
             memory_limit_mb: request.memory_limit_mb,
         },
     ))
+}
+
+fn sandbox_error_kind_to_synapse_error(kind: SandboxErrorKind) -> SynapseError {
+    match kind {
+        SandboxErrorKind::WallTimeout => SynapseError::WallTimeout,
+        SandboxErrorKind::CpuTimeLimitExceeded => SynapseError::CpuTimeLimitExceeded,
+        SandboxErrorKind::MemoryLimitExceeded => SynapseError::MemoryLimitExceeded,
+        SandboxErrorKind::SandboxPolicyBlocked => {
+            SynapseError::SandboxPolicy("sandbox policy blocked".to_string())
+        }
+        SandboxErrorKind::RuntimeUnavailable => {
+            SynapseError::RuntimeUnavailable("runtime unavailable".to_string())
+        }
+        SandboxErrorKind::ExecutionFailed => {
+            SynapseError::Execution("execution failed".to_string())
+        }
+        SandboxErrorKind::AuditFailed => SynapseError::Audit("audit failed".to_string()),
+        SandboxErrorKind::IoError => SynapseError::Execution("io error".to_string()),
+    }
+}
+
+fn core_audit_event(
+    event: SandboxAuditEvent,
+    request_id: &str,
+    tenant_id: Option<&str>,
+) -> AuditEvent {
+    let kind = match event.kind {
+        SandboxAuditKind::FileAccess => AuditEventKind::FileAccess,
+        SandboxAuditKind::NetworkAttempt => AuditEventKind::NetworkAttempt,
+        SandboxAuditKind::ProcessSpawn => AuditEventKind::ProcessSpawn,
+    };
+    let mut audit = audit_event(request_id.to_string(), tenant_id, kind, event.message);
+    audit.fields = event.fields;
+    audit
 }
 
 fn validate_request_against_engine(

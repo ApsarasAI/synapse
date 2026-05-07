@@ -95,3 +95,22 @@ impl SynapseError {
         }
     }
 }
+
+impl From<synapse_engine::SandboxError> for SynapseError {
+    fn from(error: synapse_engine::SandboxError) -> Self {
+        match error {
+            synapse_engine::SandboxError::InvalidInput(message) => Self::InvalidInput(message),
+            synapse_engine::SandboxError::RuntimeUnavailable(message) => {
+                Self::RuntimeUnavailable(message)
+            }
+            synapse_engine::SandboxError::Execution(message) => Self::Execution(message),
+            synapse_engine::SandboxError::WallTimeout => Self::WallTimeout,
+            synapse_engine::SandboxError::CpuTimeLimitExceeded => Self::CpuTimeLimitExceeded,
+            synapse_engine::SandboxError::MemoryLimitExceeded => Self::MemoryLimitExceeded,
+            synapse_engine::SandboxError::SandboxPolicy(message) => Self::SandboxPolicy(message),
+            synapse_engine::SandboxError::Audit(message) => Self::Audit(message),
+            synapse_engine::SandboxError::Io(error) => Self::Io(error),
+            synapse_engine::SandboxError::Internal(message) => Self::Internal(message),
+        }
+    }
+}

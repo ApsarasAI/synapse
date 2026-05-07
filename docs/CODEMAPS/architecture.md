@@ -27,10 +27,14 @@ synapse-core
   -> config.rs    配置读取与默认值
   -> providers.rs 横切能力入口
   -> service.rs   业务编排与请求校验
-  -> runtime.rs   沙箱、脚本、进程与平台执行
+  -> runtime.rs   engine 兼容 re-export
   -> pool.rs      预热池、租约与指标
   -> executor.rs  兼容导出层
+synapse-engine
+  -> runtime.rs   Bubblewrap 引擎、脚本、进程与平台执行
+  -> cgroups.rs   Linux cgroups v2 支持
   -> seccomp.rs   Linux seccomp 支持
+  -> syscall_audit.rs strace syscall 审计解析
 ```
 
 ## 分层依赖
@@ -39,13 +43,14 @@ types/error
   -> config
   -> providers
   -> service
-  -> runtime
   -> pool
+  -> synapse-engine
   -> api/cli
 ```
 
 补充说明：
-- `service` 可以调用 `runtime`，但 `runtime` 不能反向依赖 `service`、`api`、`cli`。
+- `synapse-core` 可以调用 `synapse-engine`，但 `synapse-engine` 不依赖 `synapse-core`、`api`、`cli`。
+- `service` 负责业务编排与 engine 类型映射，不承载 Linux/bwrap 细节。
 - `api` 和 `cli` 是入口层，只负责协议适配、命令装配和启动。
 - `executor.rs` 当前只作为兼容 facade，避免外部调用点在拆分期间失稳。
 
@@ -58,7 +63,7 @@ POST /execute
   -> SandboxLease::execute()
   -> service::execute_with_engine_and_registry()
   -> SandboxEngine / SandboxInstance
-  -> runtime bubblewrap implementation
+  -> synapse-engine Bubblewrap implementation
   -> Python subprocess / bubblewrap sandbox
   -> ExecuteResponse JSON
 ```
@@ -71,7 +76,7 @@ Client
   -> in-memory SandboxPool
   -> service layer
   -> sandbox engine abstraction
-  -> runtime bubblewrap backend
+  -> synapse-engine bubblewrap backend
   -> OS process + temp workspace + seccomp/bwrap
 ```
 
@@ -83,7 +88,10 @@ Client
 - `crates/synapse-console/src/lib.rs`：控制台静态资源导出
 - `crates/synapse-console/src/admin_console.html`：运维控制台单文件页面
 - `crates/synapse-core/src/service.rs`：请求校验、语言解析、执行编排
-- `crates/synapse-core/src/runtime.rs`：沙箱目录、脚本写入、进程执行、超时与平台策略
+- `crates/synapse-core/src/runtime.rs`：engine 兼容 re-export
+- `crates/synapse-engine/src/runtime.rs`：沙箱目录、脚本写入、进程执行、超时与平台策略
+- `crates/synapse-engine/src/cgroups.rs`：Linux cgroups v2 资源限制
+- `crates/synapse-engine/src/seccomp.rs`：Linux seccomp 支持
 - `crates/synapse-core/src/pool.rs`：池化复用、租约回收、指标统计
 - `crates/synapse-core/src/providers.rs`：`Providers` trait 与系统实现
 
@@ -91,12 +99,13 @@ Client
 - `synapse-cli`：命令解析、启动入口、doctor 检查触发；不承载核心执行规则
 - `synapse-api`：HTTP 接口、状态注入、错误映射、控制台页面路由；不承载平台探测与业务决策
 - `synapse-console`：只读运维控制台静态资源；不承载后端状态与数据查询逻辑
-- `synapse-core`：配置、providers、执行编排、运行时、安全隔离、响应模型
+- `synapse-core`：配置、providers、执行编排、响应模型、engine 输出映射
+- `synapse-engine`：沙箱引擎 trait、默认 Bubblewrap 引擎、Linux 隔离与审计实现
 
 ## 架构要求
 - 业务代码不得直接读取环境变量、探测 PATH、生成临时目录名或直接依赖进程环境；统一经由 `Providers`。
 - `service` 负责“执行什么”和“如何归类结果”，不直接处理 HTTP/CLI 协议。
-- `runtime` 负责“如何执行”，包括沙箱目录、脚本写入、子进程启动、超时控制、seccomp/bwrap。
+- `synapse-engine` 负责“如何执行”，包括沙箱目录、脚本写入、子进程启动、超时控制、seccomp/bwrap。
 - `api` 只负责路由、状态注入、HTTP 映射和错误到状态码的转换。
 - `cli` 只负责命令解析、装配和触发 provider 驱动的检查逻辑。
 - Linux 安全执行路径必须依赖 `bwrap`，不允许静默 fallback 到非隔离执行。
@@ -106,12 +115,13 @@ Client
 ## 禁止事项
 - 禁止 `synapse-core` 直接读取 `std::env`。
 - 禁止 `api` 绕过 `service` 直接调用 `runtime`。
-- 禁止 `runtime` 处理 HTTP 状态码、JSON、CLI 参数或用户交互。
+- 禁止 `synapse-engine` 处理 HTTP 状态码、JSON、CLI 参数或用户交互。
 - 禁止 `cli` 在 `main.rs` 中堆叠具体检查逻辑或平台探测实现。
 - 禁止把新的系统访问点分散回 `server.rs`、`main.rs`、`service.rs`。
 
 ## 当前状态
 - 阶段 1 已完成：环境读取、命令查找、临时路径生成已集中到 `providers`/`config`。
-- 阶段 2 已完成：`executor.rs` 已拆为 `service.rs` + `runtime.rs`。
+- 阶段 2 已完成：`executor.rs` 已拆为 `service.rs` + engine 兼容层。
+- 阶段 2.5 已完成：Linux sandbox engine 实现已抽到 `synapse-engine`。
 - 阶段 3 已完成：`server.rs` 收紧为 HTTP 适配层，`main.rs` 收紧为 CLI 装配入口，`doctor` 独立到模块。
 - 阶段 4 未完成：依赖边界尚未自动化检查，当前仍主要依赖代码结构和测试维持。

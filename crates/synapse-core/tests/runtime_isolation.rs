@@ -1,6 +1,6 @@
 use synapse_core::{
-    DefaultSandboxEngine, ExecuteRequest, NetworkPolicy, RuntimeRegistry, SandboxEngine,
-    SandboxExecution,
+    DefaultSandboxEngine, EngineNetworkPolicy, EngineRuntimeArtifact, ExecuteRequest,
+    NetworkPolicy, RuntimeRegistry, SandboxEngine, SandboxExecution,
 };
 
 fn request(code: &str) -> ExecuteRequest {
@@ -37,6 +37,11 @@ async fn sandbox_reset_clears_overlay_state_between_runs() {
     let Ok(runtime) = registry.resolve("python", None) else {
         return;
     };
+    let runtime_artifact = EngineRuntimeArtifact::new(
+        runtime.artifact().binary().to_path_buf(),
+        runtime.artifact().workspace_lowerdir().to_path_buf(),
+        runtime.info().command.clone(),
+    );
     let engine = DefaultSandboxEngine;
     let sandbox = engine.prepare().await.unwrap();
     let first_request = request(
@@ -44,12 +49,12 @@ async fn sandbox_reset_clears_overlay_state_between_runs() {
     );
     let first = sandbox
         .execute(SandboxExecution {
-            runtime: &runtime,
+            runtime: &runtime_artifact,
             code: &first_request.code,
             wall_timeout_ms: first_request.timeout_ms,
             cpu_time_limit_ms: first_request.effective_cpu_time_limit_ms(),
             memory_limit_mb: first_request.memory_limit_mb,
-            network_policy: &first_request.network_policy,
+            network_policy: EngineNetworkPolicy::Disabled,
         })
         .await
         .unwrap();
@@ -60,12 +65,12 @@ async fn sandbox_reset_clears_overlay_state_between_runs() {
         request("from pathlib import Path\nprint(Path('/workspace/state.txt').exists())\n");
     let second = sandbox
         .execute(SandboxExecution {
-            runtime: &runtime,
+            runtime: &runtime_artifact,
             code: &second_request.code,
             wall_timeout_ms: second_request.timeout_ms,
             cpu_time_limit_ms: second_request.effective_cpu_time_limit_ms(),
             memory_limit_mb: second_request.memory_limit_mb,
-            network_policy: &second_request.network_policy,
+            network_policy: EngineNetworkPolicy::Disabled,
         })
         .await
         .unwrap();
